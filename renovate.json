@@ -1,0 +1,16 @@
+{
+  "extends": ["config:base"],
+  "regexManagers": [
+    {
+      "fileMatch": ["Dockerfile", "docker-compose.yml"],
+      "matchStrings": [
+        "ARG\\s+SWITCHYARD_VERSION\\s*=\\s*(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)",
+        "SWITCHYARD_VERSION:\\s*(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "datasourceTemplate": "github-tags",
+      "depNameTemplate": "switchyard",
+      "lookupNameTemplate": "NVIDIA-NeMo/Switchyard",
+      "versioningTemplate": "loose"
+    }
+  ]
+}

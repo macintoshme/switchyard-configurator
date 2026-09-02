@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "switchyard.fullname" . }}
+  labels:
+    {{- include "switchyard.labels" . | nindent 4 }}
+  {{- if .Values.reloader.enabled }}
+  annotations:
+    reloader.stakater.com/auto: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.switchyard.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "switchyard.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "switchyard.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: switchyard
+          image: "{{ .Values.switchyard.image }}"
+          imagePullPolicy: {{ .Values.switchyard.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.switchyard.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "switchyard.fullname" . }}-config
+          volumeMounts:
+            - name: config
+              mountPath: /etc/switchyard
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.switchyard.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.switchyard.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "switchyard.fullname" . }}-config
+            items:
+              - key: routes.toml
+                path: routes.toml
+              - key: .env
+                path: .env

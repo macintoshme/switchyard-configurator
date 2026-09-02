@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "configurator.fullname" . }}
+  labels:
+    {{- include "configurator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.configurator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "configurator.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "configurator.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "configurator.fullname" . }}
+      containers:
+        - name: configurator
+          image: "{{ .Values.configurator.image }}"
+          imagePullPolicy: {{ .Values.configurator.pullPolicy }}
+          env:
+            - name: CONFIGURATOR_PORT
+              value: "{{ .Values.configurator.port }}"
+            - name: CONFIGURATOR_UID
+              value: "{{ .Values.configurator.uid }}"
+            - name: CONFIGURATOR_GID
+              value: "{{ .Values.configurator.gid }}"
+          ports:
+            - containerPort: {{ .Values.configurator.port }}
+          volumeMounts:
+            - name: config
+              mountPath: /app
+      volumes:
+        - name: config
+          emptyDir: {}

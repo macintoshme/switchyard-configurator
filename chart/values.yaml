@@ -1,0 +1,35 @@
+# Default values for switchyard-helm.
+# Users can override these via --set or a custom values file.
+
+# Static routes file – can be overridden with --set-file routesToml=...
+routesToml: |
+  # Add your default routes.toml content here
+  # Empty file will be generated if not provided.
+
+# Provider definitions – only meta data; tokens are stored in Secrets.
+providers: []
+
+# Switchyard deployment settings
+switchyard:
+  replicaCount: 1
+  image: nemo-switchyard:v0.2.0
+  pullPolicy: IfNotPresent
+  port: 4000
+  resources: {}
+
+# Configurator deployment settings
+configurator:
+  replicaCount: 1
+  image: nemo-switchyard-configurator:latest
+  pullPolicy: IfNotPresent
+  port: 8080
+  uid: 1000
+  gid: 1000
+  resources: {}
+
+# Service type – ClusterIP by default; override if external exposure needed.
+serviceType: ClusterIP
+
+# Annotations for Stakater reloader – switchyard pod will be restarted on ConfigMap changes.
+reloader:
+  enabled: true

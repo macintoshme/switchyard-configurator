@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NeMo Switchyard Configurator</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⇄</span>
+      <div class="brand-text">
+        <h1>NeMo Switchyard Configurator</h1>
+        <p>Configure routes.toml &amp; .env from the browser</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="unsaved-pill" class="pill hidden">unsaved changes</span>
+      <span id="status-pill" class="pill">…</span>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs" role="tablist">
+    <button class="tab active" data-tab="overview" role="tab" aria-controls="pane-overview" aria-selected="true">Overview</button>
+    <button class="tab" data-tab="providers" role="tab" aria-controls="pane-providers" aria-selected="false">Providers</button>
+    <button class="tab" data-tab="routes" role="tab" aria-controls="pane-routes" aria-selected="false">Routes</button>
+    <button class="tab" data-tab="review" role="tab" aria-controls="pane-review" aria-selected="false">Review &amp; Save</button>
+  </nav>
+
+  <main id="main">
+    <!-- Overview -->
+    <section id="pane-overview" class="pane active"></section>
+
+    <!-- Providers -->
+    <section id="pane-providers" class="pane"></section>
+
+    <!-- Routes -->
+    <section id="pane-routes" class="pane"></section>
+
+    <!-- Review & Save -->
+    <section id="pane-review" class="pane"></section>
+  </main>
+
+  <!-- Provider edit modal -->
+  <div id="provider-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="provider-modal-title">Add Provider</h2>
+        <button class="icon-btn" data-close="provider-modal" title="Close" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="grid2">
+          <label>Local name
+            <input id="p-name" placeholder="openai" />
+          </label>
+          <label>Display name
+            <input id="p-display" placeholder="OpenAI (optional)" />
+          </label>
+        </div>
+        <label>Endpoint
+          <input id="p-endpoint" placeholder="https://api.openai.com/v1 or host:port" />
+        </label>
+        <div class="grid2">
+          <label>API key
+            <div class="key-row">
+              <input id="p-apikey" type="password" placeholder="sk-... (blank = no auth)" autocomplete="off" />
+              <button type="button" class="tiny" id="p-key-toggle" aria-label="Show API key">show</button>
+            </div>
+          </label>
+          <label>Env var
+            <input id="p-envvar" placeholder="OPENAI_API_KEY" />
+          </label>
+        </div>
+        <label>Max retries
+          <input id="p-retries" type="number" min="0" value="2" />
+        </label>
+
+        <div class="probe-row">
+          <button class="btn" id="p-probe">Test &amp; Fetch Models</button>
+          <button class="btn ghost" id="p-refresh" title="Refresh models for all saved providers">Refresh all</button>
+          <span id="p-probe-status" class="probe-status"></span>
+        </div>
+
+        <div id="p-models-section" class="hidden">
+          <div class="models-head">
+            <strong>Models <span id="p-model-count"></span></strong>
+            <span>
+              <a href="#" id="p-select-all">all</a> / <a href="#" id="p-select-none">none</a>
+            </span>
+          </div>
+          <div id="p-models" class="checklist"></div>
+          <div class="manual-row">
+            <input id="p-manual" placeholder="model-a, model-b (add manually if fetch fails)" />
+            <button class="tiny" id="p-manual-add">Add</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-close="provider-modal">Cancel</button>
+        <button class="btn primary" id="p-save">Save Provider</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Route edit modal -->
+  <div id="route-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="route-modal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="route-modal-title">Add Route</h2>
+        <button class="icon-btn" data-close="route-modal" title="Close" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="grid2">
+          <label>Local name
+            <input id="r-name" placeholder="smart (TOML table key)" />
+          </label>
+          <label>Route ID
+            <input id="r-id" placeholder="switchyard/smart (model clients send)" />
+          </label>
+        </div>
+        <label>Type
+          <select id="r-type"></select>
+        </label>
+        <p id="r-type-desc" class="help"></p>
+
+        <!-- passthrough -->
+        <div id="sec-passthrough" class="sec hidden">
+          <label>Target</label><div id="r-passthrough-target"></div>
+        </div>
+
+        <!-- random -->
+        <div id="sec-random" class="sec hidden">
+          <p class="help">Select at least two models. Each selected target gets a weight slider showing the live traffic split.</p>
+          <div id="r-random-targets" class="checklist"></div>
+        </div>
+
+        <!-- llm_classifier_capability -->
+        <div id="sec-llm_classifier_capability" class="sec hidden">
+          <label>Classifier (judge)</label><div id="r-cap-classifier"></div>
+          <div class="grid2">
+            <div><label>Weak target</label><div id="r-cap-weak"></div></div>
+            <div><label>Strong target</label><div id="r-cap-strong"></div></div>
+          </div>
+          <label>Base threshold (p_solve floor for weak)
+            <input id="r-cap-threshold" type="number" step="0.05" min="0" max="1" value="0.5" />
+          </label>
+          <details class="advanced">
+            <summary>Advanced: judge cadence, prompt, output budget</summary>
+            <div class="grid2">
+              <label>Threshold step (per boundary)
+                <input id="r-cap-threshold-step" type="number" step="0.05" min="0" value="0.0" />
+              </label>
+              <label>Classify trigger
+                <select id="r-cap-trigger">
+                  <option value="every_request">every_request</option>
+                  <option value="user_turn">user_turn</option>
+                  <option value="new_session">new_session</option>
+                </select>
+              </label>
+            </div>
+            <div class="grid2">
+              <label>Recent turn window (blank = opening + latest)
+                <input id="r-cap-window" type="number" min="0" placeholder="6" />
+              </label>
+              <label>Max output tokens (judge)
+                <input id="r-cap-max-tokens" type="number" min="1" value="4096" />
+              </label>
+            </div>
+            <label>Response format
+              <select id="r-cap-rft">
+                <option value="json_schema">json_schema</option>
+                <option value="json_object">json_object</option>
+              </select>
+            </label>
+            <div class="bool-row">
+              <input type="checkbox" id="r-cap-hash-fallback" />
+              <label for="r-cap-hash-fallback">message_hash_fallback (requires new_session)</label>
+            </div>
+            <label>Judge prompt override (blank = packaged rubric)
+              <textarea id="r-cap-prompt" class="field-area" placeholder="Estimate whether the weak target can complete the request..."></textarea>
+            </label>
+          </details>
+        </div>
+
+        <!-- llm_classifier_escalation -->
+        <div id="sec-llm_classifier_escalation" class="sec hidden">
+          <label>Judge target</label><div id="r-esc-judge"></div>
+          <div class="grid2">
+            <div><label>Weak target</label><div id="r-esc-weak"></div></div>
+            <div><label>Strong target</label><div id="r-esc-strong"></div></div>
+          </div>
+          <div class="grid2">
+            <label>Confirmations <input id="r-esc-confirmations" type="number" min="1" value="2" /></label>
+            <label>Turn window <input id="r-esc-window" type="number" min="1" value="28" /></label>
+          </div>
+          <details class="advanced">
+            <summary>Advanced: window truncation, prompt, output budget</summary>
+            <div class="grid2">
+              <label>Window message chars (per-msg cap)
+                <input id="r-esc-msg-chars" type="number" min="50" value="500" />
+              </label>
+              <label>Max output tokens (judge)
+                <input id="r-esc-max-tokens" type="number" min="1" value="4096" />
+              </label>
+            </div>
+            <label>Response format
+              <select id="r-esc-rft">
+                <option value="json_schema">json_schema</option>
+                <option value="json_object">json_object</option>
+              </select>
+            </label>
+            <label>Judge prompt override (blank = packaged trajectory-judge prompt)
+              <textarea id="r-esc-prompt" class="field-area" placeholder="Judge whether the weak model is stuck..."></textarea>
+            </label>
+          </details>
+        </div>
+
+        <!-- llm_classifier_custom -->
+        <div id="sec-llm_classifier_custom" class="sec hidden">
+          <p class="help">The judge returns JSON matching your schema; a policy reads a selector from the verdict to pick one of the targets.</p>
+          <label>Classifier (judge)</label><div id="r-cust-classifier"></div>
+          <label>Routing targets (select 2+)</label>
+          <div id="r-cust-targets" class="checklist"></div>
+          <div class="grid2">
+            <div><label>Default target (fallback)</label><div id="r-cust-default"></div></div>
+            <label>Policy selector (jsonptr)
+              <input id="r-cust-selector" placeholder="/decision/target" />
+            </label>
+          </div>
+          <details class="advanced" open>
+            <summary>Response schema &amp; judge settings</summary>
+            <label>Response schema (JSON Schema, sent to the judge)
+              <textarea id="r-cust-schema" class="field-area tall" placeholder='{ "type": "object", "properties": { "decision": { ... } }, "required": ["decision"] }'></textarea>
+            </label>
+            <div class="grid2">
+              <label>Classify trigger
+                <select id="r-cust-trigger">
+                  <option value="every_request">every_request</option>
+                  <option value="user_turn">user_turn</option>
+                  <option value="new_session">new_session</option>
+                </select>
+              </label>
+              <label>Response format
+                <select id="r-cust-rft">
+                  <option value="json_schema">json_schema</option>
+                  <option value="json_object">json_object</option>
+                </select>
+              </label>
+            </div>
+            <label>Max output tokens (judge)
+              <input id="r-cust-max-tokens" type="number" min="1" value="4096" />
+            </label>
+            <label>Judge prompt
+              <textarea id="r-cust-prompt" class="field-area" placeholder="Choose the best configured target for this request..."></textarea>
+            </label>
+          </details>
+        </div>
+
+        <!-- stage_router -->
+        <div id="sec-stage_router" class="sec hidden">
+          <div class="grid2">
+            <div><label>Capable target</label><div id="r-stage-capable"></div></div>
+            <div><label>Efficient target</label><div id="r-stage-efficient"></div></div>
+          </div>
+          <div class="grid2">
+            <label>Picker
+              <select id="r-stage-picker">
+                <option value="efficient_first">efficient_first (cost-first)</option>
+                <option value="capable_first">capable_first (quality-first, experimental)</option>
+              </select>
+            </label>
+            <label>Confidence threshold
+              <input id="r-stage-confidence" type="number" step="0.05" min="0" max="1" value="0.5" />
+            </label>
+          </div>
+          <details class="advanced">
+            <summary>Advanced: windows, per-tier prompts, handoff notes, classifier fallback</summary>
+            <label>Recent turn window (blank = server default 3)
+              <input id="r-stage-window" type="number" min="1" placeholder="3" />
+            </label>
+            <label>Capable system prompt
+              <textarea id="r-stage-cap-prompt" class="field-area" placeholder="diagnose before you edit"></textarea>
+            </label>
+            <label>Efficient system prompt
+              <textarea id="r-stage-eff-prompt" class="field-area" placeholder="follow the settled plan"></textarea>
+            </label>
+            <div class="subhead">Handoff notes</div>
+            <label>Escalation note (sent to capable on a signal-driven escalation)
+              <textarea id="r-stage-handoff-esc" class="field-area" placeholder="the previous model was stalling; pick up the diagnosis"></textarea>
+            </label>
+            <label>De-escalation note (sent to efficient on a settled signal)
+              <textarea id="r-stage-handoff-deesc" class="field-area" placeholder=""></textarea>
+            </label>
+            <div class="bool-row">
+              <input type="checkbox" id="r-stage-handoff-only" checked />
+              <label for="r-stage-handoff-only">only_on_wrong_signal_escalation (default true)</label>
+            </div>
+            <div class="subhead">Optional LLM classifier fallback</div>
+            <p class="help">Consulted only for turns that fall below the confidence threshold. Give the judge its own quota bucket.</p>
+            <div class="bool-row">
+              <input type="checkbox" id="r-stage-cls-enabled" />
+              <label for="r-stage-cls-enabled">Enable [routes.X.classifier] block</label>
+            </div>
+            <label>Judge target</label><div id="r-stage-cls-target"></div>
+            <div class="grid2">
+              <label>Base threshold
+                <input id="r-stage-cls-threshold" type="number" step="0.05" min="0" max="1" value="0.5" />
+              </label>
+              <label>Threshold step
+                <input id="r-stage-cls-step" type="number" step="0.05" min="0" value="0.1" />
+              </label>
+            </div>
+            <div class="grid2">
+              <label>Recent turn window
+                <input id="r-stage-cls-window" type="number" min="1" value="3" />
+              </label>
+              <label>Response format
+                <select id="r-stage-cls-rft">
+                  <option value="json_schema">json_schema</option>
+                  <option value="json_object">json_object</option>
+                </select>
+              </label>
+            </div>
+            <label>Judge prompt override (blank = packaged capability prompt)
+              <textarea id="r-stage-cls-prompt" class="field-area" placeholder=""></textarea>
+            </label>
+          </details>
+        </div>
+
+        <!-- advisor -->
+        <div id="sec-advisor" class="sec hidden">
+          <div class="grid2">
+            <div><label>Executor</label><div id="r-adv-executor"></div></div>
+            <div><label>Advisor (reviewer)</label><div id="r-adv-advisor"></div></div>
+          </div>
+          <div class="grid2">
+            <label>Max reviews <input id="r-adv-reviews" type="number" min="1" value="3" /></label>
+            <label>Stall turns <input id="r-adv-stall" type="number" min="0" value="30" /></label>
+          </div>
+          <details class="advanced">
+            <summary>Advanced: gate trigger, advisor budget, transcript, prompts</summary>
+            <div class="grid2">
+              <label>Gate trigger
+                <select id="r-adv-trigger">
+                  <option value="no_tool_call">no_tool_call</option>
+                  <option value="pattern">pattern</option>
+                </select>
+              </label>
+              <label>Gate trigger pattern (regex; required for pattern)
+                <input id="r-adv-trigger-pattern" placeholder="^DONE$" />
+              </label>
+            </div>
+            <div class="grid2">
+              <label>Gate min tool results
+                <input id="r-adv-min-tool" type="number" min="0" value="0" />
+              </label>
+              <label>Advisor max tokens
+                <input id="r-adv-max-tokens" type="number" min="1" value="2048" />
+              </label>
+            </div>
+            <div class="grid2">
+              <label>Advisor temperature (blank = unset)
+                <input id="r-adv-temp" type="number" step="0.1" min="0" placeholder="0.2" />
+              </label>
+              <label>Transcript max chars
+                <input id="r-adv-transcript" type="number" min="1" value="200000" />
+              </label>
+            </div>
+            <div class="bool-row">
+              <input type="checkbox" id="r-adv-fail-open" checked />
+              <label for="r-adv-fail-open">fail_open (advisor failure passes the turn through; default true)</label>
+            </div>
+            <label>Reviewer system prompt (blank = built-in APPROVE/REDO contract)
+              <textarea id="r-adv-reviewer-prompt" class="field-area" placeholder=""></textarea>
+            </label>
+            <label>REDO feedback prefix (blank = built-in)
+              <textarea id="r-adv-redo-prefix" class="field-area" placeholder=""></textarea>
+            </label>
+          </details>
+        </div>
+
+        <!-- composite -->
+        <div id="sec-composite" class="sec hidden">
+          <p class="help">An LLM classifier picks the tier per user turn; a stage router runs the tool-execution loop on its own signals until the next user turn. Tier is retained per session.</p>
+          <label>Classifier judge target</label><div id="r-comp-judge"></div>
+          <div class="grid2">
+            <div><label>Capable target</label><div id="r-comp-capable"></div></div>
+            <div><label>Efficient target</label><div id="r-comp-efficient"></div></div>
+          </div>
+          <label>Confidence threshold
+            <input id="r-comp-confidence" type="number" step="0.05" min="0" max="1" value="0.5" />
+          </label>
+          <details class="advanced">
+            <summary>Advanced: classifier cadence, stage tuning, prompts</summary>
+            <div class="grid2">
+              <label>Classify trigger
+                <select id="r-comp-trigger">
+                  <option value="user_turn">user_turn</option>
+                  <option value="new_session">new_session</option>
+                  <option value="every_request">every_request</option>
+                </select>
+              </label>
+              <label>Classifier base threshold
+                <input id="r-comp-cls-threshold" type="number" step="0.05" min="0" max="1" value="0.5" />
+              </label>
+            </div>
+            <div class="grid2">
+              <label>Classifier threshold step
+                <input id="r-comp-cls-step" type="number" step="0.05" min="0" value="0.1" />
+              </label>
+              <label>Recent turn window (stage)
+                <input id="r-comp-window" type="number" min="1" placeholder="3" />
+              </label>
+            </div>
+            <div class="bool-row">
+              <input type="checkbox" id="r-comp-hash-fallback" />
+              <label for="r-comp-hash-fallback">message_hash_fallback (keys on first user message)</label>
+            </div>
+            <label>Capable system prompt
+              <textarea id="r-comp-cap-prompt" class="field-area" placeholder=""></textarea>
+            </label>
+            <label>Efficient system prompt
+              <textarea id="r-comp-eff-prompt" class="field-area" placeholder=""></textarea>
+            </label>
+            <div class="subhead">Handoff notes</div>
+            <label>Escalation note
+              <textarea id="r-comp-handoff-esc" class="field-area" placeholder=""></textarea>
+            </label>
+            <label>De-escalation note
+              <textarea id="r-comp-handoff-deesc" class="field-area" placeholder=""></textarea>
+            </label>
+            <div class="bool-row">
+              <input type="checkbox" id="r-comp-handoff-only" checked />
+              <label for="r-comp-handoff-only">only_on_wrong_signal_escalation (default true)</label>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-close="route-modal">Cancel</button>
+        <button class="btn primary" id="r-save">Save Route</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

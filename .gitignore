@@ -1,0 +1,6 @@
+.env
+*.draft
+*.bak
+__pycache__/
+switchyard/config/routes.toml
+switchyard/config/provider_meta.json

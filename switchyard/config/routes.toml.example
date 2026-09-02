@@ -1,0 +1,79 @@
+# NeMo Switchyard route configuration
+#
+# Copy this file to routes.toml and edit for your environment:
+#   cp routes.toml.example routes.toml
+#
+# Or run `uv run configure.py` to generate it interactively.
+#
+# Secrets are never stored here — only the name of the env var to read
+# (the env var itself lives in .env or your shell).
+#
+# See the upstream configuration docs for the full schema:
+# https://github.com/NVIDIA-NeMo/Switchyard/blob/main/crates/switchyard-server/README.md
+
+schema_version = 1
+
+# --- LLM clients ------------------------------------------------------------
+# Each entry is an OpenAI-compatible endpoint. `api_key_env` names the env
+# var holding the API key. Omit `api_key_env` for endpoints that need no key.
+
+[llm_clients.openai]
+format = "openai_chat"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+max_retries = 2
+
+[llm_clients.local]
+format = "openai_chat"
+base_url = "http://localhost:11434/v1"
+max_retries = 2
+
+# --- Targets ----------------------------------------------------------------
+# A target maps a logical name to (model id, llm client). Routes reference
+# targets by their table name (e.g. "target_0").
+
+[targets.target_0]
+id = "gpt-4o"
+llm_client = "openai"
+
+[targets.target_1]
+id = "gpt-4o-mini"
+llm_client = "openai"
+
+[targets.target_2]
+id = "llama3.1"
+llm_client = "local"
+
+# --- Routes -----------------------------------------------------------------
+# The route `id` is the model name clients send to switchyard. Six route
+# types are supported: passthrough, random, llm_classifier (capability or
+# escalation), stage_router, advisor_gate. See the configure.py wizard for
+# the full set.
+
+# Passthrough: forward directly to a single target.
+[routes.passthrough_gpt_4o]
+id = "gpt-4o"
+type = "passthrough"
+target = "target_0"
+
+[routes.passthrough_gpt_4o_mini]
+id = "gpt-4o-mini"
+type = "passthrough"
+target = "target_1"
+
+[routes.passthrough_llama3_1]
+id = "llama3.1"
+type = "passthrough"
+target = "target_2"
+
+# LLM classifier (escalation): a judge model picks weak vs strong target,
+# escalating to the strong target after N confirmations within a turn
+# window. This is the route the README's test curl uses.
+[routes.escalation]
+id = "switchyard/escalation"
+type = "llm_classifier"
+mode = "escalation"
+classifier_target = "target_1"
+weak_target = "target_1"
+strong_target = "target_0"
+escalation = { confirmations = 2, recent_turn_window = 28 }
