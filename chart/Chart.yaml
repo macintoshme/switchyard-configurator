@@ -2,7 +2,7 @@ apiVersion: v2
 name: switchyard
 description: Helm chart for NeMo Switchyard and its web configurator
 type: application
-version: 0.2.6
-appVersion: v0.2.6
+version: 0.2.7
+appVersion: v0.2.7
 kubeVersion: ">=1.25.0-0"
 icon: https://raw.githubusercontent.com/NVIDIA-NeMo/Switchyard/main/assets/logo.png

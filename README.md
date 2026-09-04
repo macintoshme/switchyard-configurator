@@ -22,7 +22,13 @@ Every `v*` tag push publishes (via GitHub Actions, see `.github/workflows/releas
 
 This repo no longer publishes a server image. The chart's `switchyard.image` defaults point at the fork pipeline's image, `ghcr.io/macintoshme/nemo-switchyard`, built from upstream's root Dockerfile: `main` and `sha-<commit>` tags on every push to [macintoshme/Switchyard](https://github.com/macintoshme/Switchyard), plus a `vX.Y.Z` tag per upstream release. The server image this repo used to publish (built from `switchyard/Dockerfile` at the pinned upstream tag) has been removed from ghcr.
 
-The **released chart (0.2.6)** predates that switch: its deployment passes no server args and sets `SWITCHYARD_PORT`, so it cannot run the fork image, and its legacy server image is gone from ghcr. Build the server locally for it (see below), or install from `./chart` in this repo (unreleased), which passes `--config`/`--port` itself and defaults to both published images, so a plain install needs no registry overrides.
+The **released chart (0.2.7)** passes `--config`/`--port` itself and defaults to both published images, so a plain install needs no overrides:
+
+```bash
+helm upgrade --install switchyard oci://ghcr.io/macintoshme/charts/switchyard --version 0.2.7
+```
+
+Chart 0.2.6 predates that switch (no server args, `SWITCHYARD_PORT`, and its legacy server image is gone from ghcr), so it only runs with a locally built server image.
 
 > Note: the published artifacts are publicly pullable. If you fork this repo, packages pushed by your workflows may start **private** — check the visibility in the ghcr.io package settings (or add `imagePullSecrets`) before expecting unauthenticated installs.
 
@@ -30,24 +36,24 @@ The **released chart (0.2.6)** predates that switch: its deployment passes no se
 
 For local development or clusters that cannot reach ghcr.io, build and push the images yourself. On any cluster whose nodes cannot see your local Docker daemon you must push them to a registry the cluster can reach and point the chart at it.
 
-1. **Build** (from the repo root). Tag the configurator with the **chart version** (its default tag follows `appVersion`, currently `v0.2.6`); tag the server to match whatever you set as `switchyard.image.tag`. The server binary builds from the pinned upstream tag (`v0.2.0`):
+1. **Build** (from the repo root). Tag the configurator with the **chart version** (its default tag follows `appVersion`, currently `v0.2.7`); tag the server to match whatever you set as `switchyard.image.tag`. The server binary builds from the pinned upstream tag (`v0.2.0`):
    ```bash
    # Switchyard server: multi-stage Rust build of the pinned upstream tag
-   docker build -t nemo-switchyard:v0.2.6 switchyard/
+   docker build -t nemo-switchyard:v0.2.7 switchyard/
 
    # Configurator: the build context is the repo root (-f), because the
    # image also copies the shared switchyard_config/ package
-   docker build -f configurator/Dockerfile -t nemo-switchyard-configurator:v0.2.6 .
+   docker build -f configurator/Dockerfile -t nemo-switchyard-configurator:v0.2.7 .
    ```
    Build a different upstream release with `--build-arg SWITCHYARD_VERSION=<git-tag>` (see `switchyard/Dockerfile`).
 
 2. **Push** both images to a registry your cluster can reach:
    ```bash
    REGISTRY=ghcr.io/your-org
-   docker tag  nemo-switchyard:v0.2.6              $REGISTRY/nemo-switchyard:v0.2.6
-   docker tag  nemo-switchyard-configurator:v0.2.6 $REGISTRY/nemo-switchyard-configurator:v0.2.6
-   docker push $REGISTRY/nemo-switchyard:v0.2.6
-   docker push $REGISTRY/nemo-switchyard-configurator:v0.2.6
+   docker tag  nemo-switchyard:v0.2.7              $REGISTRY/nemo-switchyard:v0.2.7
+   docker tag  nemo-switchyard-configurator:v0.2.7 $REGISTRY/nemo-switchyard-configurator:v0.2.7
+   docker push $REGISTRY/nemo-switchyard:v0.2.7
+   docker push $REGISTRY/nemo-switchyard-configurator:v0.2.7
    ```
 
 3. **Point the chart at them** via a values file:
@@ -56,7 +62,7 @@ For local development or clusters that cannot reach ghcr.io, build and push the 
      image:
        registry: ghcr.io/your-org
        repository: nemo-switchyard
-       tag: v0.2.6        # empty = chart appVersion
+       tag: v0.2.7        # empty = chart appVersion
    configurator:
      image:
        registry: ghcr.io/your-org

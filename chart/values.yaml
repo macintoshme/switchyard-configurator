@@ -88,7 +88,7 @@ configurator:
     # the chart's configurator version.
     registry: ghcr.io
     repository: macintoshme/nemo-switchyard-configurator
-    tag: v0.2.6
+    tag: v0.2.7
   pullPolicy: IfNotPresent
   port: 8080
   uid: 1000
