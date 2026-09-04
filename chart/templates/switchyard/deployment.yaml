@@ -35,11 +35,16 @@ spec:
         - name: switchyard
           image: "{{ include "switchyard.image" . }}"
           imagePullPolicy: {{ .Values.switchyard.pullPolicy }}
+          # The image's ENTRYPOINT is `switchyard-server` with no default
+          # args; --config is required and no port is read from the env.
+          args:
+            - --config
+            - /etc/switchyard/routes.toml
+            - --port
+            - "{{ .Values.switchyard.port }}"
           ports:
             - containerPort: {{ .Values.switchyard.port }}
           env:
-            - name: SWITCHYARD_PORT
-              value: "{{ .Values.switchyard.port }}"
             {{- include "switchyard.providerEnv" $ | nindent 12 }}
           {{- if include "switchyard.tokenSecretEnabled" . }}
           # Provider tokens entered in the configurator web UI: the

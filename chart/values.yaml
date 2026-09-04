@@ -62,13 +62,14 @@ imagePullSecrets: []
 switchyard:
   replicaCount: 1
   image:
-    # Empty registry keeps the image unqualified (local cluster / hub style);
-    # set it for a real registry, e.g. registry: ghcr.io
-    registry: ""
-    repository: nemo-switchyard
-    # Empty tag defaults to the chart appVersion.
-    tag: ""
-  pullPolicy: IfNotPresent
+    # Published by the switchyard fork's image pipeline (ghcr, public).
+    # `main` rolls with every push to the fork; pin with `sha-<commit>` or
+    # an upstream release tag (`vX.Y.Z`).
+    registry: ghcr.io
+    repository: macintoshme/nemo-switchyard
+    tag: main
+  # Always re-resolve the rolling `main` tag on pod start.
+  pullPolicy: Always
   port: 4000
   # Resource guidance — the Rust server is lightweight; raise for high
   # throughput. Example:
