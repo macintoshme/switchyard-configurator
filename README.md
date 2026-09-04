@@ -6,7 +6,7 @@ This repository provides a Helm chart to deploy **NVIDIA NeMo Switchyard** and i
 
 | Service      | Image / build                     | Port | Purpose |
 |--------------|-----------------------------------|------|---------|
-| switchyard   | built from `v0.2.0` source        | 4000 | LLM proxy + `/metrics` |
+| switchyard   | `ghcr.io/macintoshme/nemo-switchyard` (fork pipeline) | 4000 | LLM proxy + `/metrics` |
 | configurator | built from local `configurator/` Dockerfile | 8080 | Web UI to edit `routes.toml` |
 
 *Prometheus and Grafana are assumed to be provided by the cluster (e.g., via `kube-prometheus-stack`). Both integrations are opt-in: setting `serviceMonitor.enabled=true` creates a `ServiceMonitor` so Prometheus scrapes Switchyard, and `grafanaDashboard.enabled=true` ships the dashboard as a ConfigMap with discovery labels for the Grafana sidecar.*
@@ -17,13 +17,15 @@ Every `v*` tag push publishes (via GitHub Actions, see `.github/workflows/releas
 
 | Artifact | Location |
 |----------|----------|
-| switchyard server image | `ghcr.io/macintoshme/nemo-switchyard:<tag>` |
+| switchyard server image (legacy build) | `ghcr.io/macintoshme/nemo-switchyard:<tag>` |
 | configurator image | `ghcr.io/macintoshme/nemo-switchyard-configurator:<tag>` |
 | Helm chart (OCI) | `oci://ghcr.io/macintoshme/charts/switchyard` |
 
-The server image builds the **pinned upstream tag** (`ARG SWITCHYARD_VERSION` in `switchyard/Dockerfile`), not the release tag — this repo's versions track the configurator and chart.
+The legacy server image builds the pinned upstream tag (`ARG SWITCHYARD_VERSION` in `switchyard/Dockerfile`), not the release tag; this repo's versions track the configurator and chart.
 
-To install the released chart, point both images at ghcr.io (the chart defaults to unqualified names for local clusters):
+The chart in this repo no longer uses that build. Its `switchyard.image` defaults point at the fork pipeline's image, `ghcr.io/macintoshme/nemo-switchyard`, built from upstream's root Dockerfile: `main` and `sha-<commit>` tags on every push to [macintoshme/Switchyard](https://github.com/macintoshme/Switchyard), plus a `vX.Y.Z` tag per upstream release.
+
+The **released chart (0.2.6)** predates that switch: its deployment passes no server args and sets `SWITCHYARD_PORT`, so it needs the legacy image. Install it with both registries pointed at ghcr.io:
 
 ```bash
 helm upgrade --install switchyard oci://ghcr.io/macintoshme/charts/switchyard \
@@ -32,13 +34,15 @@ helm upgrade --install switchyard oci://ghcr.io/macintoshme/charts/switchyard \
   --set configurator.image.registry=ghcr.io/macintoshme
 ```
 
+Installing from `./chart` (this repo, unreleased) needs only the configurator registry; the server defaults to the fork image and the deployment passes `--config`/`--port` itself.
+
 > Note: the published artifacts are publicly pullable. If you fork this repo, packages pushed by your workflows may start **private** — check the visibility in the ghcr.io package settings (or add `imagePullSecrets`) before expecting unauthenticated installs.
 
 ## Building and pushing the images (local development)
 
 For local development or clusters that cannot reach ghcr.io, build and push the images yourself. On any cluster whose nodes cannot see your local Docker daemon you must push them to a registry the cluster can reach and point the chart at it.
 
-1. **Build** (from the repo root). Tag both images with the **chart version** (the chart's default image tags follow `appVersion` — currently `v0.2.6`); the server binary itself is built from the pinned upstream tag (`v0.2.0`):
+1. **Build** (from the repo root). Tag the configurator with the **chart version** (its default tag follows `appVersion`, currently `v0.2.6`); tag the server to match whatever you set as `switchyard.image.tag`. The server binary builds from the pinned upstream tag (`v0.2.0`):
    ```bash
    # Switchyard server: multi-stage Rust build of the pinned upstream tag
    docker build -t nemo-switchyard:v0.2.6 switchyard/
@@ -72,7 +76,7 @@ For local development or clusters that cannot reach ghcr.io, build and push the 
    imagePullSecrets: []   # e.g. [{ name: regcred }] for private registries
    ```
 
-Clusters that can see your local images (e.g. Rancher Desktop with the dockerd runtime, or after `minikube image load` / `kind load docker-image`) work with the unqualified default image names as-is.
+Clusters that can see your local images (e.g. Rancher Desktop with the dockerd runtime, or after `minikube image load` / `kind load docker-image`) work with unqualified names as-is for the configurator; for the server, clear `switchyard.image.registry` and set its `repository`/`tag` to your local image.
 
 ## Quick start (Helm)
 
@@ -152,6 +156,6 @@ Switchyard exposes a set of Prometheus metrics (request/error counters, latency 
 
 ## Notes
 
-- Switchyard is pre-alpha upstream. Pin/upgrade the version by setting `switchyard.image.tag` in `values.yaml` (and rebuilding the image from the matching `SWITCHYARD_VERSION` build arg).
+- Switchyard is pre-alpha upstream. Pin/upgrade by setting `switchyard.image.tag` to a fork pipeline tag (`sha-<commit>` or an upstream `vX.Y.Z`); the default `main` rolls with every push to the fork. Rebuilding from `switchyard/Dockerfile` is only for clusters that cannot reach ghcr.io.
 - The server image builds for `x86-64-v3` (AVX2) on amd64 and `neoverse-n1` on arm64 (rustflags from the upstream `.cargo/config.toml`, inherited via the git clone). Adjust the Dockerfile if you need a different target.
 - This deployment is intended for development/testing. For production you should add TLS, stricter RBAC, and external secret management.
