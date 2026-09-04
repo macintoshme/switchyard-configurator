@@ -5,7 +5,6 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,16 +16,24 @@ env:
 jobs:
   version-sync:
     runs-on: ubuntu-latest
+    outputs:
+      # Upstream server version the nemo-switchyard image builds (ARG
+      # default in switchyard/Dockerfile) — NOT the release tag: this
+      # repo's versions track the configurator + chart, while the Rust
+      # server only moves when upstream cuts a release.
+      upstream: ${{ steps.versions.outputs.upstream }}
     steps:
       - uses: actions/checkout@v4
       - name: Assert git tag matches chart versions
+        id: versions
         run: |
           set -eu
           TAG="${GITHUB_REF_NAME}"
           APPVERSION="$(awk '/^appVersion:/{print $2; exit}' chart/Chart.yaml)"
           CHARTVERSION="$(awk '/^version:/{print $2; exit}' chart/Chart.yaml)"
           CFGTAG="$(awk '/^configurator:/{f=1} f && /tag:/{print $2; exit}' chart/values.yaml)"
-          echo "tag=$TAG appVersion=$APPVERSION chartVersion=$CHARTVERSION configuratorTag=$CFGTAG"
+          UPSTREAM="$(awk '/^ARG SWITCHYARD_VERSION=/{sub(/^ARG SWITCHYARD_VERSION=/, ""); print; exit}' switchyard/Dockerfile)"
+          echo "tag=$TAG appVersion=$APPVERSION chartVersion=$CHARTVERSION configuratorTag=$CFGTAG upstream=$UPSTREAM"
           if [ "${TAG#v}" != "$CHARTVERSION" ]; then
             echo "::error::git tag $TAG does not match chart version $CHARTVERSION (without the v prefix)" && exit 1
           fi
@@ -36,6 +43,13 @@ jobs:
           if [ "$TAG" != "$CFGTAG" ]; then
             echo "::error::git tag $TAG does not match configurator image tag $CFGTAG in values.yaml" && exit 1
           fi
+          # Fail fast (with a clear message) if the pinned upstream tag
+          # does not exist, instead of failing deep inside the Rust build.
+          if ! git ls-remote --tags https://github.com/NVIDIA-NeMo/Switchyard.git \
+                | grep -q "refs/tags/${UPSTREAM}\$"; then
+            echo "::error::pinned upstream tag $UPSTREAM (switchyard/Dockerfile) does not exist at NVIDIA-NeMo/Switchyard" && exit 1
+          fi
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
 
   images:
     needs: version-sync
@@ -47,8 +61,8 @@ jobs:
           - name: nemo-switchyard
             context: switchyard/
             file: switchyard/Dockerfile
-            # The server image builds the pinned upstream tag.
-            build-args: SWITCHYARD_VERSION=${{ github.ref_name }}
+            # Builds the pinned upstream tag (see version-sync output).
+            build-args: SWITCHYARD_VERSION=${{ needs.version-sync.outputs.upstream }}
           - name: nemo-switchyard-configurator
             # The configurator build context is the repo root because the
             # image also copies the shared switchyard_config/ package.

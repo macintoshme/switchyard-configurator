@@ -11,9 +11,32 @@ This repository provides a Helm chart to deploy **NVIDIA NeMo Switchyard** and i
 
 *Prometheus and Grafana are assumed to be provided by the cluster (e.g., via `kube-prometheus-stack`). Both integrations are opt-in: setting `serviceMonitor.enabled=true` creates a `ServiceMonitor` so Prometheus scrapes Switchyard, and `grafanaDashboard.enabled=true` ships the dashboard as a ConfigMap with discovery labels for the Grafana sidecar.*
 
-## Building and pushing the images
+## Released artifacts
 
-No prebuilt images are published. `nemo-switchyard` and `nemo-switchyard-configurator` are local build artifacts. On any cluster whose nodes cannot see your local Docker daemon you must build, push, and point the chart at your registry first.
+Every `v*` tag push publishes (via GitHub Actions, see `.github/workflows/release.yml`):
+
+| Artifact | Location |
+|----------|----------|
+| switchyard server image | `ghcr.io/macintoshme/nemo-switchyard:<tag>` |
+| configurator image | `ghcr.io/macintoshme/nemo-switchyard-configurator:<tag>` |
+| Helm chart (OCI) | `oci://ghcr.io/macintoshme/charts/switchyard` |
+
+The server image builds the **pinned upstream tag** (`ARG SWITCHYARD_VERSION` in `switchyard/Dockerfile`), not the release tag — this repo's versions track the configurator and chart.
+
+To install the released chart, point both images at ghcr.io (the chart defaults to unqualified names for local clusters):
+
+```bash
+helm upgrade --install switchyard oci://ghcr.io/macintoshme/charts/switchyard \
+  --version 0.2.6 \
+  --set switchyard.image.registry=ghcr.io/macintoshme \
+  --set configurator.image.registry=ghcr.io/macintoshme
+```
+
+> Note: ghcr.io packages are **private by default** on first publish. Flip them to public in the package settings (or add `imagePullSecrets`) if installs should work unauthenticated.
+
+## Building and pushing the images (local development)
+
+For local development or clusters that cannot reach ghcr.io, build and push the images yourself. On any cluster whose nodes cannot see your local Docker daemon you must push them to a registry the cluster can reach and point the chart at it.
 
 1. **Build** (from the repo root):
    ```bash
@@ -79,7 +102,7 @@ Clusters that can see your local images (e.g. Rancher Desktop with the dockerd r
    ```bash
    kubectl port-forward -n switchyard svc/switchyard-configurator 8080:8080
    ```
-   The UI lets you add providers, create routes, and save the configuration. Saving PATCHes the config `ConfigMap` (via the configurator's service account); if the Stakater Reloader is installed, its annotation on the switchyard `Deployment` rolls the pods so new routes are picked up, and every `helm upgrade` rolls them via a config checksum regardless. Provider tokens are supplied as Kubernetes `Secrets` and injected as environment variables and never stored in the `ConfigMap`.
+   The UI lets you add providers, create routes, and save the configuration. Saving PATCHes the config `ConfigMap` (via the configurator's service account); if the Stakater Reloader is installed, its annotation on the switchyard `Deployment` rolls the pods so new routes are picked up, and every `helm upgrade` rolls them via a config checksum regardless. Provider tokens entered in the UI are persisted into a UI-managed Secret (`<release>-tokens`) that both deployments load via `envFrom`; the `ConfigMap` never contains token values. Disable this with `configurator.tokenSecret.enabled=false` to rely solely on the pre-provisioned `providers:` secretKeyRefs from step 1.
 
 4. **Verify** – check that Switchyard is healthy and serving metrics:
    ```bash
@@ -112,7 +135,7 @@ Providers are defined in the UI (or via the Helm `values.yaml`). Each provider n
 - `secret` – the name of the Kubernetes `Secret` that stores the token
 - `secretKey` – the key inside the `Secret` (default `token`)
 
-The UI and the chart inject provider tokens as environment variables via `secretKeyRef`; nothing is written to the `ConfigMap` or any file.
+The UI and the chart inject provider tokens as environment variables via `secretKeyRef` (pre-provisioned) or the UI-managed `<release>-tokens` Secret (entered in the web UI); nothing is written to the `ConfigMap` or any file.
 
 ## Metrics
 
