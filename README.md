@@ -22,7 +22,7 @@ Every `v*` tag push publishes (via GitHub Actions, see `.github/workflows/releas
 
 This repo no longer publishes a server image. The chart's `switchyard.image` defaults point at the fork pipeline's image, `ghcr.io/macintoshme/nemo-switchyard`, built from upstream's root Dockerfile: `main` and `sha-<commit>` tags on every push to [macintoshme/Switchyard](https://github.com/macintoshme/Switchyard), plus a `vX.Y.Z` tag per upstream release. The server image this repo used to publish (built from `switchyard/Dockerfile` at the pinned upstream tag) has been removed from ghcr.
 
-The **released chart (0.2.6)** predates that switch: its deployment passes no server args and sets `SWITCHYARD_PORT`, so it cannot run the fork image, and its legacy server image is gone from ghcr. Build the server locally for it (see below), or install from `./chart` in this repo (unreleased), which passes `--config`/`--port` itself and needs only the configurator registry.
+The **released chart (0.2.6)** predates that switch: its deployment passes no server args and sets `SWITCHYARD_PORT`, so it cannot run the fork image, and its legacy server image is gone from ghcr. Build the server locally for it (see below), or install from `./chart` in this repo (unreleased), which passes `--config`/`--port` itself and defaults to both published images, so a plain install needs no registry overrides.
 
 > Note: the published artifacts are publicly pullable. If you fork this repo, packages pushed by your workflows may start **private** — check the visibility in the ghcr.io package settings (or add `imagePullSecrets`) before expecting unauthenticated installs.
 
@@ -64,7 +64,7 @@ For local development or clusters that cannot reach ghcr.io, build and push the 
    imagePullSecrets: []   # e.g. [{ name: regcred }] for private registries
    ```
 
-Clusters that can see your local images (e.g. Rancher Desktop with the dockerd runtime, or after `minikube image load` / `kind load docker-image`) work with unqualified names as-is for the configurator; for the server, clear `switchyard.image.registry` and set its `repository`/`tag` to your local image.
+Clusters that can see your local images (e.g. Rancher Desktop with the dockerd runtime, or after `minikube image load` / `kind load docker-image`) work with locally built images once you clear both `image.registry` values and point the `repository`/`tag` pairs at your local images.
 
 ## Quick start (Helm)
 

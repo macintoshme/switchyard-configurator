@@ -84,9 +84,10 @@ switchyard:
 configurator:
   replicaCount: 1
   image:
-    registry: ""
-    repository: nemo-switchyard-configurator
-    # Pinned — the configurator is versioned with this chart, not upstream.
+    # Published by this repo's release pipeline (ghcr, public); pinned to
+    # the chart's configurator version.
+    registry: ghcr.io
+    repository: macintoshme/nemo-switchyard-configurator
     tag: v0.2.6
   pullPolicy: IfNotPresent
   port: 8080
