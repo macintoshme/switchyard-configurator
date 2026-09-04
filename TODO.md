@@ -425,7 +425,7 @@ Actions pipelines item. Re-verify the baseline after every change:
   no `data`), and two subsequent no-flag upgrades to the same version
   completed without conflicts.
 
-- [ ] **GitHub Actions pipelines for images and chart artifacts** — IN PROGRESS (2026-09-02)
+- [x] **GitHub Actions pipelines for images and chart artifacts** — done (2026-09-03)
   The repo will be hosted on GitHub, so CI must produce the release
   artifacts end to end: build and push both images (switchyard multi-stage
   Rust build, configurator) and package/publish the Helm chart (OCI
@@ -434,8 +434,16 @@ Actions pipelines item. Re-verify the baseline after every change:
   `Chart.appVersion` relates to backlog 7️⃣'s replacement item.
   *Fix:* workflows under `.github/workflows/`
   (`docker/build-push-action`, `helm package` + push or chart-releaser).
-  *Verify:* a tag push builds and publishes both images plus the chart,
-  and the README install steps work against the published artifacts.
+  *Verify:* **v0.2.6 tag release** (run 33824245851, all jobs green):
+  version-sync (tag == chart/appVersion/configurator-tag, pinned upstream
+  tag exists), both images (server correctly built from the pinned
+  upstream `v0.2.0`, not the release tag), chart pushed to
+  `oci://ghcr.io/macintoshme/charts/switchyard:0.2.6`. Anonymous pulls
+  verified for both images + chart (HTTP 200 / `helm show chart`), README
+  documents the OCI install path. Local dev leftovers
+  (`switchyard-0.2.0.tgz` is gitignored; `sy-registry` still running for
+  local chart pushes) can be retired whenever — released artifacts now
+  come from ghcr.
 
 ### P3 — docs and chart hygiene
 
