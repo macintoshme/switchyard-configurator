@@ -17,24 +17,12 @@ Every `v*` tag push publishes (via GitHub Actions, see `.github/workflows/releas
 
 | Artifact | Location |
 |----------|----------|
-| switchyard server image (legacy build) | `ghcr.io/macintoshme/nemo-switchyard:<tag>` |
 | configurator image | `ghcr.io/macintoshme/nemo-switchyard-configurator:<tag>` |
 | Helm chart (OCI) | `oci://ghcr.io/macintoshme/charts/switchyard` |
 
-The legacy server image builds the pinned upstream tag (`ARG SWITCHYARD_VERSION` in `switchyard/Dockerfile`), not the release tag; this repo's versions track the configurator and chart.
+This repo no longer publishes a server image. The chart's `switchyard.image` defaults point at the fork pipeline's image, `ghcr.io/macintoshme/nemo-switchyard`, built from upstream's root Dockerfile: `main` and `sha-<commit>` tags on every push to [macintoshme/Switchyard](https://github.com/macintoshme/Switchyard), plus a `vX.Y.Z` tag per upstream release. The server image this repo used to publish (built from `switchyard/Dockerfile` at the pinned upstream tag) has been removed from ghcr.
 
-The chart in this repo no longer uses that build. Its `switchyard.image` defaults point at the fork pipeline's image, `ghcr.io/macintoshme/nemo-switchyard`, built from upstream's root Dockerfile: `main` and `sha-<commit>` tags on every push to [macintoshme/Switchyard](https://github.com/macintoshme/Switchyard), plus a `vX.Y.Z` tag per upstream release.
-
-The **released chart (0.2.6)** predates that switch: its deployment passes no server args and sets `SWITCHYARD_PORT`, so it needs the legacy image. Install it with both registries pointed at ghcr.io:
-
-```bash
-helm upgrade --install switchyard oci://ghcr.io/macintoshme/charts/switchyard \
-  --version 0.2.6 \
-  --set switchyard.image.registry=ghcr.io/macintoshme \
-  --set configurator.image.registry=ghcr.io/macintoshme
-```
-
-Installing from `./chart` (this repo, unreleased) needs only the configurator registry; the server defaults to the fork image and the deployment passes `--config`/`--port` itself.
+The **released chart (0.2.6)** predates that switch: its deployment passes no server args and sets `SWITCHYARD_PORT`, so it cannot run the fork image, and its legacy server image is gone from ghcr. Build the server locally for it (see below), or install from `./chart` in this repo (unreleased), which passes `--config`/`--port` itself and needs only the configurator registry.
 
 > Note: the published artifacts are publicly pullable. If you fork this repo, packages pushed by your workflows may start **private** — check the visibility in the ghcr.io package settings (or add `imagePullSecrets`) before expecting unauthenticated installs.
 
