@@ -4,7 +4,10 @@
 # searched against model ids (first match wins, so keep specific entries
 # above generic ones), `description` is shown next to matching models, and
 # `suggest` holds extra_body defaults offered as one-click suggestions
-# (capability flags here, but any request-body param is allowed).
+# (capability flags here, but any request-body param is allowed). An
+# optional `[[hint.tunable]]` array declares first-class selects for
+# nested provider params (name, label, dot path into extra_body, allowed
+# values, default, help).
 #
 # This file ships inside the configurator image. To change it without
 # rebuilding, set `modelHints` in the chart's values.yaml (mounted over
@@ -17,8 +20,6 @@ pattern = '(?i)qwen3[._-]?8'
 description = "Qwen3.8 family - multimodal (image) input and tool calling (verified on Qwen3.8-27B-FP8 / vLLM)"
 suggest = { supports_images = true, supports_tools = true }
 
-# Common vision-language naming: *-VL, vision, LLaVA, Pixtral, and the
-# multimodal flagship families from the major hosted APIs.
 # Gemma 4 served by the Gemini API (OpenAI-compatible endpoint). Its
 # thinking is inlined into `content` as <thought>...</thought> tags (there
 # is no reasoning_content on this endpoint). The thinking level is binary
@@ -29,12 +30,23 @@ suggest = { supports_images = true, supports_tools = true }
 # The `google` namespace must ride in the body-level `extra_body` envelope
 # (a top-level "google" key is rejected); since the server merges a
 # model's extra_body onto the request top level, the suggested value is
-# double-wrapped in extra_body on purpose.
+# double-wrapped in extra_body on purpose. The tunable below surfaces the
+# thinking level as a first-class select in the model settings modal.
 [[hint]]
 pattern = '(?i)^models/gemma-4'
 description = "Gemma 4 via the Gemini API: thinking inlines <thought> tags into the answer (no reasoning_content). thinking_level is binary: minimal = no thinking (clean answer), high = thinking on (tags stay inline)."
 suggest = { extra_body = { google = { thinking_config = { thinking_level = "minimal" } } } }
 
+  [[hint.tunable]]
+  name = "thinking_level"
+  label = "Thinking"
+  path = "extra_body.google.thinking_config.thinking_level"
+  values = ["minimal", "high"]
+  default = "minimal"
+  help = "minimal = no thinking (clean answer); high = thinking on (<thought> tags inline in the answer)"
+
+# Common vision-language naming: *-VL, vision, LLaVA, Pixtral, and the
+# multimodal flagship families from the major hosted APIs.
 [[hint]]
 pattern = '(?i)(^|[-/.])vl[-0-9.]|vision|llava|pixtral|gemini-[0-9]|gpt-4o|gpt-4\.1|gpt-5|claude-[0-9]'
 description = "Common vision/multimodal model families."

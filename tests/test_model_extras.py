@@ -253,3 +253,91 @@ def test_extras_display():
     assert hints_mod.extras_display(40) == "40"
     assert hints_mod.extras_display("x") == "x"
     assert json.loads(hints_mod.extras_display({"a": [1]})) == {"a": [1]}
+
+
+def _get_path(obj, path):
+    cur = obj
+    for seg in path.split("."):
+        cur = cur[seg]
+    return cur
+
+
+# ---------------------------------------------------------------------------
+# Hint tunables (first-class UI controls for nested provider params)
+# ---------------------------------------------------------------------------
+
+def test_load_hints_with_tunables(tmp_path):
+    p = tmp_path / "hints.toml"
+    p.write_text(
+        "[[hint]]\n"
+        "pattern = 'models/gemma-4'\n"
+        "description = 'd'\n"
+        "suggest = { extra_body = { google = { thinking_config = { thinking_level = \"minimal\" } } } }\n"
+        "\n"
+        "  [[hint.tunable]]\n"
+        '  name = "thinking_level"\n'
+        '  label = "Thinking"\n'
+        '  path = "extra_body.google.thinking_config.thinking_level"\n'
+        '  values = ["minimal", "high"]\n'
+        '  default = "minimal"\n'
+        '  help = "off/on"\n',
+        encoding="utf-8",
+    )
+    loaded = hints_mod.load_model_hints(str(p))
+    assert loaded["ok"], loaded.get("error")
+    t = loaded["hints"][0]["tunables"]
+    assert len(t) == 1
+    assert t[0]["name"] == "thinking_level"
+    assert t[0]["label"] == "Thinking"
+    assert t[0]["path"] == "extra_body.google.thinking_config.thinking_level"
+    assert t[0]["values"] == ["minimal", "high"]
+    assert t[0]["default"] == "minimal"
+    assert t[0]["help"] == "off/on"
+
+
+def test_load_hints_bad_tunables(tmp_path):
+    def load(body):
+        p = tmp_path / "hints.toml"
+        p.write_text("[[hint]]\n" "pattern = 'x'\n" "suggest = { a = true }\n\n"
+                     + body, encoding="utf-8")
+        return hints_mod.load_model_hints(str(p))
+
+    good = ('  [[hint.tunable]]\n'
+            '  name = "t"\n'
+            '  path = "extra_body.a.b"\n'
+            '  values = ["1", "2"]\n'
+            '  default = "1"\n')
+    assert load(good)["ok"]
+    # default not among values
+    assert not load(good.replace('default = "1"', 'default = "3"'))["ok"]
+    # single value: not a control
+    assert not load(good.replace('values = ["1", "2"]', 'values = ["1"]'))["ok"]
+    # bad name (leading digit)
+    assert not load(good.replace('name = "t"', 'name = "1t"'))["ok"]
+    # bad path segment (space)
+    assert not load(good.replace('"extra_body.a.b"', '"extra_body. a.b"'))["ok"]
+    # path too deep
+    assert not load(good.replace('"extra_body.a.b"',
+                                 '"a.b.c.d.e.f.g"'))["ok"]
+    # duplicate names
+    assert not load(good + good)["ok"]
+    # a bad tunable never hides the rest of a valid hint
+    out = load(good.replace('name = "t"', 'name = ""'))
+    assert not out["ok"]
+    assert out["hints"] == []
+
+
+def test_baked_gemma4_tunable():
+    """The baked Gemma-4 hint declares its thinking_level tunable, and the
+    suggested default sits at the tunable's path (so the select and the
+    suggestion can never disagree)."""
+    loaded = hints_mod.load_model_hints()
+    assert loaded["ok"], loaded.get("error")
+    h = hints_mod.match_hint("models/gemma-4-31b-it", loaded["hints"])
+    assert h is not None
+    tunables = {t["name"]: t for t in h["tunables"]}
+    assert "thinking_level" in tunables
+    t = tunables["thinking_level"]
+    assert t["values"] == ["minimal", "high"]
+    assert t["default"] == "minimal"
+    assert _get_path(h["suggest"], t["path"]) == t["default"]

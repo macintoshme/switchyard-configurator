@@ -463,6 +463,12 @@
         <p class="help">What this model accepts. Stored as <code>supports_*</code> keys in the target's <code>extra_body</code>; the switchyard translation layer passes content through by default, so these serve extension policies and documentation. Use the select to leave a capability unset, allow it, or explicitly block it.</p>
         <div id="m-capabilities" class="cap-grid"></div>
 
+        <div id="m-tunables-section" class="hidden">
+          <div class="subhead">Provider tunables</div>
+          <p class="help">First-class controls for nested provider-specific parameters, declared by the model's matching hint. Each select stores its value at the hinted path in the target's <code>extra_body</code>.</p>
+          <div id="m-tunables" class="cap-grid"></div>
+        </div>
+
         <div class="subhead">Extra request parameters</div>
         <p class="help">Merged into every request body sent to this model's provider (e.g. <code>top_k</code> or <code>repetition_penalty</code> for vLLM, <code>service_tier</code> for OpenAI). Permissive backends ignore unknown keys; strict APIs may reject them — only add params the provider understands.</p>
         <div id="m-extras"></div>

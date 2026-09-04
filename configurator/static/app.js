@@ -603,6 +603,70 @@ function hintFor(model) {
   return (row && row.hint) || null;
 }
 
+// First-class controls declared by the model's hint (nested provider
+// params like a Gemini thinking level), as opposed to free-form rows.
+function tunablesFor(model) {
+  const hint = hintFor(model);
+  return (hint && hint.tunables) || [];
+}
+
+function tunableOwnedKeys(model) {
+  return new Set(tunablesFor(model).map((t) => t.path.split(".")[0]));
+}
+
+// Dot-path access into the model's extra_body object.
+function getAtPath(obj, path) {
+  let cur = obj;
+  for (const seg of path.split(".")) {
+    if (cur == null || typeof cur !== "object") return undefined;
+    cur = cur[seg];
+  }
+  return cur;
+}
+
+function setAtPath(obj, path, value) {
+  const segs = path.split(".");
+  let cur = obj;
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (typeof cur[segs[i]] !== "object" || cur[segs[i]] == null) cur[segs[i]] = {};
+    cur = cur[segs[i]];
+  }
+  cur[segs[segs.length - 1]] = value;
+}
+
+// Remove the leaf at path and prune ancestors that become empty, so no
+// empty provider envelopes (e.g. google: {}) linger in the request body.
+function deleteAtPath(obj, path) {
+  const segs = path.split(".");
+  let cur = obj;
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (cur == null || typeof cur !== "object") return;
+    cur = cur[segs[i]];
+  }
+  if (cur == null || typeof cur !== "object") return;
+  delete cur[segs[segs.length - 1]];
+  const chain = [obj];
+  let c = obj;
+  for (let i = 0; i < segs.length - 1; i++) { c = c[segs[i]]; chain.push(c); }
+  for (let i = chain.length - 1; i > 0; i--) {
+    if (typeof chain[i] === "object" && chain[i] !== null && !Object.keys(chain[i]).length) {
+      delete chain[i - 1][segs[i - 1]];
+    }
+  }
+}
+
+// Chip rendering for an extra value (nested structures as compact JSON).
+function valueText(v) {
+  return typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+}
+
+// Suggested values must be deep-copied when applied: the hint object is
+// shared across renders, and in-place edits (e.g. tunable selects writing
+// nested paths) would otherwise mutate the suggestion itself.
+function deepClone(v) {
+  return JSON.parse(JSON.stringify(v));
+}
+
 // Suggestion state for a model: which suggested keys are still unset,
 // which are set to a DIFFERENT value, and whether the selections match
 // the hint's defaults exactly. "Set" alone is not "matched" — a blocked
@@ -613,7 +677,9 @@ function suggestionState(model, extras) {
   const e = extras || {};
   const entries = Object.entries(hint.suggest);
   const unset = entries.filter(([k]) => !(k in e));
-  const differing = entries.filter(([k, v]) => k in e && e[k] !== v);
+  // Deep-compare: suggested values may be nested (tunable envelopes).
+  const differing = entries.filter(([k, v]) =>
+    k in e && JSON.stringify(e[k]) !== JSON.stringify(v));
   return { hint, unset, differing, matches: !unset.length && !differing.length };
 }
 
@@ -623,36 +689,43 @@ function capShortLabel(key) {
 }
 
 // Chips for suggested keys whose current value differs from the suggestion.
-function differsChips(differing, extras) {
+function differsChips(differing, extras, tunables) {
   return differing.map(([k, v]) => {
     const cur = extras[k];
     const curTxt = CAPABILITY_KEYS.has(k)
-      ? (cur === true ? "allow" : "block") : String(cur);
+      ? (cur === true ? "allow" : "block") : valueText(cur);
     const sugTxt = CAPABILITY_KEYS.has(k)
-      ? (v === true ? "allow" : "block") : String(v);
+      ? (v === true ? "allow" : "block") : valueText(v);
     return `<span class="tag err">${escapeHtml(capShortLabel(k))}: ${escapeHtml(curTxt)} (suggested ${escapeHtml(sugTxt)})</span>`;
   }).join(" ");
 }
 
-function capChip(key, value) {
+function capChip(key, value, tunables) {
   const cap = CAPABILITY_FLAGS.find((c) => c[0] === key);
   if (cap) {
     return value === false
       ? `<span class="tag">${escapeHtml(cap[2])}: no</span>`
       : `<span class="tag ok">${escapeHtml(cap[2])}</span>`;
   }
-  return `<span class="chip">${escapeHtml(key)}=${escapeHtml(String(value))}</span>`;
+  // Tunable-owned keys chip as "Label=leaf value" instead of the full
+  // nested envelope (e.g. Thinking=minimal).
+  const tun = (tunables || []).find((t) => t.path.split(".")[0] === key);
+  if (tun) {
+    const leaf = getAtPath(value, tun.path.split(".").slice(1).join("."));
+    return `<span class="chip">${escapeHtml(tun.label)}=${leaf === undefined ? "unset" : escapeHtml(String(leaf))}</span>`;
+  }
+  return `<span class="chip">${escapeHtml(key)}=${escapeHtml(valueText(value))}</span>`;
 }
 
-function extrasChips(extras) {
+function extrasChips(extras, tunables) {
   const entries = Object.entries(extras || {});
   if (!entries.length) return `<span class="tag">—</span>`;
-  return entries.map(([k, v]) => capChip(k, v)).join(" ");
+  return entries.map(([k, v]) => capChip(k, v, tunables)).join(" ");
 }
 
-function suggestedChips(pending) {
+function suggestedChips(pending, tunables) {
   return pending
-    .map(([k, v]) => capChip(k, v).replace('class="tag ok"', 'class="tag warn"'))
+    .map(([k, v]) => capChip(k, v, tunables).replace('class="tag ok"', 'class="tag warn"'))
     .join(" ");
 }
 
@@ -668,16 +741,17 @@ function renderModels() {
     let suggestAll = 0;
     const rows = models.map((m) => {
       const sug = suggestionState(m.model, m.extra_body);
+      const tunables = tunablesFor(m.model);
       if (sug && sug.unset.length) suggestAll++;
       const suggestCol = !sug
         ? `<span class="tag">—</span>`
         : sug.matches
           ? `<span class="tag ok">all set</span>`
-          : `${sug.unset.length ? suggestedChips(sug.unset) : ""}${sug.differing.length ? `<span class="tag err">${sug.differing.length} value(s) differ</span>` : ""}`;
+          : `${sug.unset.length ? suggestedChips(sug.unset, tunables) : ""}${sug.differing.length ? `<span class="tag err">${sug.differing.length} value(s) differ</span>` : ""}`;
       return `<tr>
         <td class="mono">${escapeHtml(m.model)}</td>
         <td>${escapeHtml(m.provider_label || m.provider)}</td>
-        <td>${extrasChips(m.extra_body)}</td>
+        <td>${extrasChips(m.extra_body, tunables)}</td>
         <td>${suggestCol}</td>
         <td style="text-align:right"><button class="btn small" data-model-settings="${escapeHtml(m.model)}">Settings</button></td>
       </tr>`;
@@ -745,6 +819,7 @@ function renderModelModal() {
   // Hint box with description, match state, and one-click actions.
   const sug = suggestionState(MODEX.model, extras);
   const hint = sug && sug.hint;
+  const tunables = tunablesFor(MODEX.model);
   const hintBox = document.getElementById("m-hint-box");
   if (hint) {
     hintBox.classList.remove("hidden");
@@ -752,8 +827,8 @@ function renderModelModal() {
     const status = sug.matches
       ? `<p class="help" style="margin:0">All suggested values are set.</p>`
       : [
-          sug.unset.length ? `<div>${suggestedChips(sug.unset)}</div>` : "",
-          sug.differing.length ? `<div>${differsChips(sug.differing, extras)}</div>` : "",
+          sug.unset.length ? `<div>${suggestedChips(sug.unset, tunables)}</div>` : "",
+          sug.differing.length ? `<div>${differsChips(sug.differing, extras, tunables)}</div>` : "",
         ].join("");
     const buttons = [
       // Apply fills only unset keys; intentional choices survive.
@@ -769,14 +844,14 @@ function renderModelModal() {
     const apply = hintBox.querySelector("#m-apply-hint");
     if (apply) apply.onclick = () => {
       for (const [k, v] of Object.entries(hint.suggest || {})) {
-        if (!(k in extras)) extras[k] = v;
+        if (!(k in extras)) extras[k] = deepClone(v);
       }
       renderModelModal();
     };
     const restore = hintBox.querySelector("#m-restore-hint");
     if (restore) restore.onclick = () => {
       for (const [k, v] of Object.entries(hint.suggest || {})) {
-        extras[k] = v;
+        extras[k] = deepClone(v);
       }
       renderModelModal();
     };
@@ -809,14 +884,46 @@ function renderModelModal() {
       renderModelModal();
     });
 
+  // Provider tunables declared by the hint: one select each, writing the
+  // value at its hinted dot path inside extra_body.
+  const tunWrap = document.getElementById("m-tunables");
+  const tunSection = document.getElementById("m-tunables-section");
+  if (!tunables.length) {
+    tunSection.classList.add("hidden");
+    tunWrap.innerHTML = "";
+  } else {
+    tunSection.classList.remove("hidden");
+    tunWrap.innerHTML = tunables.map((t) => {
+      const cur = getAtPath(extras, t.path);
+      const opts = ["", ...t.values].map((v) =>
+        `<option value="${escapeHtml(v)}" ${cur === v ? "selected" : ""}>`
+        + `${v === "" ? "unset" : escapeHtml(v) + (v === t.default ? " (suggested)" : "")}</option>`
+      ).join("");
+      return `<div class="cap-row${cur !== undefined ? " set" : ""}">
+        <div class="cap-name"><b>${escapeHtml(t.label)}</b><br><span class="help">${escapeHtml(t.help || "")}</span></div>
+        <select data-tunable="${escapeHtml(t.name)}" aria-label="${escapeHtml(t.label)}">${opts}</select>
+      </div>`;
+    }).join("");
+    tunWrap.querySelectorAll("select[data-tunable]").forEach((sel) =>
+      sel.onchange = () => {
+        const t = tunables.find((x) => x.name === sel.dataset.tunable);
+        if (!t) return;
+        if (sel.value === "") deleteAtPath(extras, t.path);
+        else setAtPath(extras, t.path, sel.value);
+        renderModelModal();
+      });
+  }
+
   renderExtraRows();
 }
 
-// Free-form parameter rows for keys outside the capability vocabulary.
+// Free-form parameter rows for keys outside the capability vocabulary and
+// not owned by a hint tunable (tunables get their own selects).
 function renderExtraRows() {
   const wrap = document.getElementById("m-extras");
   const extras = MODEX.extras;
-  const keys = Object.keys(extras).filter((k) => !CAPABILITY_KEYS.has(k));
+  const owned = tunableOwnedKeys(MODEX.model);
+  const keys = Object.keys(extras).filter((k) => !CAPABILITY_KEYS.has(k) && !owned.has(k));
   if (!keys.length) {
     wrap.innerHTML = `<p class="help">(none)</p>`;
     return;
