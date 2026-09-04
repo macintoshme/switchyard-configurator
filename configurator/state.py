@@ -45,6 +45,7 @@ from switchyard_config.routes import (
     ensure_passthrough_routes,
     find_route_cycles,
     generate_toml,
+    is_auto_passthrough,
     load_existing_routes,
     parse_routes_text,
     read_env_var_from,
@@ -693,8 +694,11 @@ class ConfigManager:
 
     def snapshot(self) -> dict:
         s = self.state
+        # Custom routes are everything that is not an auto-generated
+        # passthrough — including passthroughs the user created by hand,
+        # which the UI must show (only the per-model auto ones are hidden).
         custom_route_indices = [
-            i for i, r in enumerate(s.routes) if r.type != "passthrough"
+            i for i, r in enumerate(s.routes) if not is_auto_passthrough(r)
         ]
         passthrough_count = len(s.routes) - len(custom_route_indices)
         return {

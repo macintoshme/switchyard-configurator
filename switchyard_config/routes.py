@@ -946,19 +946,40 @@ def find_route_cycles(state: ConfigState) -> list[list[str]]:
 # Passthrough route helpers
 # ---------------------------------------------------------------------------
 
-def _passthrough_route_for(model_id: str) -> Route:
-    """Build the auto-generated passthrough route for a model id.
+def auto_passthrough_name(model_id: str) -> str:
+    """TOML table name of the auto-generated passthrough for *model_id*.
 
-    The local TOML name is derived from the model ID (lowercased, with
-    ``/``, ``.``, ``-`` replaced by ``_``) so it's a valid bare key.
+    The model ID is lowercased with ``/``, ``.``, ``-`` replaced by ``_``
+    so it's a valid bare key.
     """
     safe = model_id.replace("/", "_").replace(".", "_").replace("-", "_").lower()
+    return f"passthrough_{safe}"
+
+
+def _passthrough_route_for(model_id: str) -> Route:
+    """Build the auto-generated passthrough route for a model id."""
     return Route(
-        name=f"passthrough_{safe}",
+        name=auto_passthrough_name(model_id),
         id=model_id,
         type="passthrough",
         target=model_id,
     )
+
+
+def is_auto_passthrough(route: Route) -> bool:
+    """True when *route* is an auto-generated passthrough, not a custom one.
+
+    Auto passthroughs are created by :func:`ensure_passthrough_routes` with
+    a name derived from the model id and ``id == target == model id``. A
+    passthrough the user created by hand keeps its own name (or has a
+    different id/target pair, e.g. a synthetic route id) and counts as a
+    custom route in the UI.
+    """
+    if route.type != "passthrough" or not route.id:
+        return False
+    if route.target != route.id:
+        return False
+    return route.name == auto_passthrough_name(route.id)
 
 
 def ensure_passthrough_routes(
