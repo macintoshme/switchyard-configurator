@@ -19,7 +19,23 @@ suggest = { supports_images = true, supports_tools = true }
 
 # Common vision-language naming: *-VL, vision, LLaVA, Pixtral, and the
 # multimodal flagship families from the major hosted APIs.
+# Gemma 4 served by the Gemini API (OpenAI-compatible endpoint). Its
+# thinking is inlined into `content` as <thought>...</thought> tags (there
+# is no reasoning_content on this endpoint). The thinking level is binary
+# on this family: "minimal" switches thinking off for a clean answer,
+# "high" keeps it (the tags then stay inline in the content). "low"/
+# "medium" and thinking budgets are rejected by the API (HTTP 400), as are
+# reasoning_effort and include_thoughts (no effect).
+# The `google` namespace must ride in the body-level `extra_body` envelope
+# (a top-level "google" key is rejected); since the server merges a
+# model's extra_body onto the request top level, the suggested value is
+# double-wrapped in extra_body on purpose.
 [[hint]]
-pattern = '(?i)(^|[-/.])vl[-0-9.]|vision|llava|pixtral|gemini-[0-9]|gpt-4o|gpt-4\\.1|gpt-5|claude-[0-9]'
-description = "Vision-capable model - accepts image input alongside text"
+pattern = '(?i)^models/gemma-4'
+description = "Gemma 4 via the Gemini API: thinking inlines <thought> tags into the answer (no reasoning_content). thinking_level is binary: minimal = no thinking (clean answer), high = thinking on (tags stay inline)."
+suggest = { extra_body = { google = { thinking_config = { thinking_level = "minimal" } } } }
+
+[[hint]]
+pattern = '(?i)(^|[-/.])vl[-0-9.]|vision|llava|pixtral|gemini-[0-9]|gpt-4o|gpt-4\.1|gpt-5|claude-[0-9]'
+description = "Common vision/multimodal model families."
 suggest = { supports_images = true }

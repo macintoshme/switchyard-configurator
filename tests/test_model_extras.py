@@ -178,6 +178,36 @@ def test_load_baked_hints():
         assert h["pattern"] and isinstance(h["suggest"], dict)
 
 
+def test_baked_hint_gemma4_google_api():
+    """The baked hint matches the Gemini-API model id (models/gemma-4-*)
+    and suggests the binary thinking_level control; the local-served id
+    must not pick it up."""
+    loaded = hints_mod.load_model_hints()
+    assert loaded["ok"], loaded.get("error")
+    h = hints_mod.match_hint("models/gemma-4-31b-it", loaded["hints"])
+    assert h is not None, "Google-served Gemma 4 id should match its hint"
+    # Double-wrapped on purpose: the server merges the model's extra_body
+    # onto the request top level, while the Gemini endpoint needs the
+    # google namespace inside a body-level extra_body envelope.
+    assert h["suggest"]["extra_body"]["google"]["thinking_config"][
+        "thinking_level"
+    ] == "minimal"
+    local = hints_mod.match_hint("google/gemma-4-31b", loaded["hints"])
+    assert local is None or "thinking_config" not in local["suggest"]
+
+
+def test_gemma4_hint_suggestion_is_valid_extras():
+    """The suggested nested value must be accepted by set_model_extras
+    validation, or the UI 'Apply suggestions' would 400."""
+    loaded = hints_mod.load_model_hints()
+    assert loaded["ok"], loaded.get("error")
+    h = hints_mod.match_hint("models/gemma-4-31b-it", loaded["hints"])
+    assert h is not None
+    from configurator.state import ConfigManager
+    for key, value in h["suggest"].items():
+        assert ConfigManager._validate_extra_value(value, key) is None
+
+
 def test_match_hint_first_wins():
     hints = [
         {"pattern": "(?i)qwen3[._-]?8", "description": "specific",
