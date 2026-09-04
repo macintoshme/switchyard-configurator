@@ -1,6 +1,6 @@
 # TODO
 
-_Last updated: 2026-09-03_
+_Last updated: 2026-09-04_
 
 ## Maintenance protocol — read before working on anything in this repo
 
@@ -35,6 +35,13 @@ they go — a stale TODO is worse than none.
 ---
 
 ## 1. Chart fixes (from critical review, 2026-09-02)
+
+> **Moved out (2026-09-04):** the `chart/` directory was ported to
+> [macintoshme/switchyard-helm](https://github.com/macintoshme/switchyard-helm)
+> (chart at the repo root, CI + OCI release pipeline included). All further
+> chart work happens there; this section is kept as history. The local
+> re-verify baseline `helm lint chart && helm template chart` no longer
+> applies to this repo.
 
 Current state (2026-09-02): **P0, P1, P2, and P3 complete** — the chart
 renders, `helm lint` is fully clean (no INFO/ERROR), all resources pass
@@ -706,7 +713,7 @@ The entire opencode/OpenRouter integration (config writing, pricing lookups, `sw
 
 ### 7️⃣ Version‑bump script — obsolete as written (2026-09-02)
 ~~Create `scripts/bump_version.py` that updates `SWITCHYARD_VERSION` in the Dockerfile and `docker-compose.yml`.~~ — obsolete: `docker-compose.yml` no longer exists after the Helm conversion.
-- [ ] Replacement: `scripts/bump_version.py` that updates `SWITCHYARD_VERSION` (`switchyard/Dockerfile:13`), `appVersion` (`chart/Chart.yaml:6`), and the default `switchyard.image` tag in `chart/values.yaml` together.
+- [ ] Replacement: `scripts/bump_version.py` that updates `SWITCHYARD_VERSION` (`switchyard/Dockerfile:13`), `appVersion` (`chart/Chart.yaml:6`), and the default `switchyard.image` tag in `chart/values.yaml` together. — reworked (2026-09-04): the chart files moved to the `switchyard-helm` repo, so the script must either edit across both checkouts or be replaced by a manual two-repo release checklist (see README, "Released artifacts").
 - [ ] Add a git commit helper that tags the commit.
 
 ### 8️⃣ Extend CI pipeline

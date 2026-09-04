@@ -1,6 +1,6 @@
-# Release pipeline: on a v* tag push, verify version sync, then build and
-# push the configurator image and the Helm chart to ghcr.io. The server
-# image is built by the Switchyard fork's own pipeline instead.
+# Release pipeline: on a v* tag push, build and push the configurator
+# image to ghcr.io. The server image is built by the Switchyard fork's own
+# pipeline, and the Helm chart is published from the switchyard-helm repo.
 name: release
 
 on:
@@ -19,23 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Assert git tag matches chart versions
-        id: versions
+      - name: Assert git tag is a stable version
         run: |
           set -eu
           TAG="${GITHUB_REF_NAME}"
-          APPVERSION="$(awk '/^appVersion:/{print $2; exit}' chart/Chart.yaml)"
-          CHARTVERSION="$(awk '/^version:/{print $2; exit}' chart/Chart.yaml)"
-          CFGTAG="$(awk '/^configurator:/{f=1} f && /tag:/{print $2; exit}' chart/values.yaml)"
-          echo "tag=$TAG appVersion=$APPVERSION chartVersion=$CHARTVERSION configuratorTag=$CFGTAG"
-          if [ "${TAG#v}" != "$CHARTVERSION" ]; then
-            echo "::error::git tag $TAG does not match chart version $CHARTVERSION (without the v prefix)" && exit 1
-          fi
-          if [ "$TAG" != "$APPVERSION" ]; then
-            echo "::error::git tag $TAG does not match chart appVersion $APPVERSION" && exit 1
-          fi
-          if [ "$TAG" != "$CFGTAG" ]; then
-            echo "::error::git tag $TAG does not match configurator image tag $CFGTAG in values.yaml" && exit 1
+          echo "tag=$TAG"
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::git tag $TAG is not of the form vX.Y.Z" && exit 1
           fi
 
   configurator-image:
@@ -63,21 +53,3 @@ jobs:
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/nemo-switchyard-configurator:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  chart:
-    needs: version-sync
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-        with:
-          version: latest
-      - name: Package chart
-        run: helm package chart
-      - name: Log in to ghcr.io
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
-            --username "${{ github.actor }}" --password-stdin
-      - name: Push chart
-        run: |
-          helm push switchyard-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts

@@ -1,34 +1,31 @@
-# NeMo Switchyard Helm chart
+# NeMo Switchyard Configurator
 
-This repository provides a Helm chart to deploy **NVIDIA NeMo Switchyard** and its web configurator on a Kubernetes cluster. The chart bundles the Switchyard proxy, the FastAPI configurator UI, and (optionally) native Prometheus `ServiceMonitor` and Grafana dashboard resources. Requires **Helm 4+** (the chart relies on server-side apply — e.g. `--create-namespace` coexisting with the chart's own `Namespace` resource).
+This repository builds the **web configurator** for NVIDIA NeMo Switchyard: a FastAPI UI that edits the `routes.toml` the Switchyard LLM proxy runs on. It contains the configurator (`configurator/`), the shared config package it uses (`switchyard_config/`), and the vendored upstream Switchyard source (`switchyard/`) used to build the server image.
+
+Deployment on Kubernetes is handled by the Helm chart in [macintoshme/switchyard-helm](https://github.com/macintoshme/switchyard-helm), which installs the Switchyard proxy, this configurator, and optional Prometheus `ServiceMonitor` and Grafana dashboard resources into a dedicated namespace.
 
 ## Services
 
 | Service      | Image / build                     | Port | Purpose |
 |--------------|-----------------------------------|------|---------|
 | switchyard   | `ghcr.io/macintoshme/nemo-switchyard` (fork pipeline) | 4000 | LLM proxy + `/metrics` |
-| configurator | built from local `configurator/` Dockerfile | 8080 | Web UI to edit `routes.toml` |
+| configurator | built from this repo's `configurator/Dockerfile` | 8080 | Web UI to edit `routes.toml` |
 
-*Prometheus and Grafana are assumed to be provided by the cluster (e.g., via `kube-prometheus-stack`). Both integrations are opt-in: setting `serviceMonitor.enabled=true` creates a `ServiceMonitor` so Prometheus scrapes Switchyard, and `grafanaDashboard.enabled=true` ships the dashboard as a ConfigMap with discovery labels for the Grafana sidecar.*
+*Prometheus and Grafana are assumed to be provided by the cluster (e.g., via `kube-prometheus-stack`). Both integrations are opt-in chart values: `serviceMonitor.enabled=true` creates a `ServiceMonitor` so Prometheus scrapes Switchyard, and `grafanaDashboard.enabled=true` ships the dashboard as a ConfigMap with discovery labels for the Grafana sidecar.*
 
 ## Released artifacts
 
-Every `v*` tag push publishes (via GitHub Actions, see `.github/workflows/release.yml`):
+Every `v*` tag push publishes the configurator image (via GitHub Actions, see `.github/workflows/release.yml`):
 
 | Artifact | Location |
 |----------|----------|
 | configurator image | `ghcr.io/macintoshme/nemo-switchyard-configurator:<tag>` |
-| Helm chart (OCI) | `oci://ghcr.io/macintoshme/charts/switchyard` |
+| Helm chart (OCI) | `oci://ghcr.io/macintoshme/charts/switchyard` — published from [macintoshme/switchyard-helm](https://github.com/macintoshme/switchyard-helm) |
+| server image | `ghcr.io/macintoshme/nemo-switchyard` — published from [macintoshme/Switchyard](https://github.com/macintoshme/Switchyard) |
 
-This repo no longer publishes a server image. The chart's `switchyard.image` defaults point at the fork pipeline's image, `ghcr.io/macintoshme/nemo-switchyard`, built from upstream's root Dockerfile: `main` and `sha-<commit>` tags on every push to [macintoshme/Switchyard](https://github.com/macintoshme/Switchyard), plus a `vX.Y.Z` tag per upstream release. The server image this repo used to publish (built from `switchyard/Dockerfile` at the pinned upstream tag) has been removed from ghcr.
+Tag the configurator release here **before** tagging the chart repo: the chart's `configurator.image` default follows the chart `appVersion`, and the chart release pipeline refuses a tag whose `values.yaml` points at a configurator image that does not exist yet.
 
-The **released chart (0.2.7)** passes `--config`/`--port` itself and defaults to both published images, so a plain install needs no overrides:
-
-```bash
-helm upgrade --install switchyard oci://ghcr.io/macintoshme/charts/switchyard --version 0.2.7
-```
-
-Chart 0.2.6 predates that switch (no server args, `SWITCHYARD_PORT`, and its legacy server image is gone from ghcr), so it only runs with a locally built server image.
+The server image builds from upstream's root Dockerfile: `main` and `sha-<commit>` tags on every push to the fork, plus a `vX.Y.Z` tag per upstream release. Building it yourself from `switchyard/Dockerfile` is only for clusters that cannot reach ghcr.io (see below).
 
 > Note: the published artifacts are publicly pullable. If you fork this repo, packages pushed by your workflows may start **private** — check the visibility in the ghcr.io package settings (or add `imagePullSecrets`) before expecting unauthenticated installs.
 
@@ -36,7 +33,7 @@ Chart 0.2.6 predates that switch (no server args, `SWITCHYARD_PORT`, and its leg
 
 For local development or clusters that cannot reach ghcr.io, build and push the images yourself. On any cluster whose nodes cannot see your local Docker daemon you must push them to a registry the cluster can reach and point the chart at it.
 
-1. **Build** (from the repo root). Tag the configurator with the **chart version** (its default tag follows `appVersion`, currently `v0.2.7`); tag the server to match whatever you set as `switchyard.image.tag`. The server binary builds from the pinned upstream tag (`v0.2.0`):
+1. **Build** (from the repo root). Tag the configurator to match the chart's `appVersion` (currently `v0.2.7`); tag the server to match whatever you set as `switchyard.image.tag`. The server binary builds from the pinned upstream tag (`v0.2.0`):
    ```bash
    # Switchyard server: multi-stage Rust build of the pinned upstream tag
    docker build -t nemo-switchyard:v0.2.7 switchyard/
@@ -56,7 +53,7 @@ For local development or clusters that cannot reach ghcr.io, build and push the 
    docker push $REGISTRY/nemo-switchyard-configurator:v0.2.7
    ```
 
-3. **Point the chart at them** via a values file:
+3. **Point the chart at them** via a values file (see the [switchyard-helm README](https://github.com/macintoshme/switchyard-helm#values) for the full values reference):
    ```yaml
    switchyard:
      image:
@@ -74,7 +71,7 @@ Clusters that can see your local images (e.g. Rancher Desktop with the dockerd r
 
 ## Quick start (Helm)
 
-1. **Create provider secrets** – each LLM client in your `routes.toml` that uses `api_key_env` needs a Kubernetes `Secret` holding that key. Example for the `openai` client used by `routes.toml.example`:
+1. **Create provider secrets** – each LLM client in your `routes.toml` that uses `api_key_env` needs a Kubernetes `Secret` holding that key. Example for the `openai` client used by `switchyard/config/routes.toml.example`:
    ```bash
    kubectl create secret generic openai-secret \
      --from-literal=token="YOUR_OPENAI_API_KEY"
@@ -86,15 +83,15 @@ Clusters that can see your local images (e.g. Rancher Desktop with the dockerd r
        secret: openai-secret
    ```
 
-2. **Install the chart** – you can override any defaults via `--set` or a custom values file. All resources deploy into a dedicated `switchyard` namespace which the chart creates for you. The chart ships a minimal placeholder `routes.toml` (one passthrough route to a local endpoint); point it at your real config to get started:
+2. **Install the chart** – install from the published OCI chart (or clone [switchyard-helm](https://github.com/macintoshme/switchyard-helm) and install from its root). The chart ships a minimal placeholder `routes.toml` (one passthrough route to a local endpoint); point it at your real config to get started:
    ```bash
-   helm upgrade --install switchyard ./chart \
+   helm upgrade --install switchyard \
+     oci://ghcr.io/macintoshme/charts/switchyard --version 0.2.7 \
      -n switchyard --create-namespace \
      --set-file routesToml=switchyard/config/routes.toml.example \
      -f my-values.yaml   # optional custom values
    ```
-   You can also edit the configuration later in the configurator UI.
-   To deploy into a different (or pre-existing) namespace, set `namespace.name`, or `namespace.name: ""` with `create: false` to use the plain `-n` release namespace.
+   You can also edit the configuration later in the configurator UI. To deploy into a different (or pre-existing) namespace, set `namespace.name`, or `namespace.name: ""` with `create: false` to use the plain `-n` release namespace.
 
 3. **Access the configurator** – once deployed, the UI is reachable at `http://localhost:<port>` (use `kubectl port-forward` or expose the service as needed):
    ```bash
@@ -141,7 +138,7 @@ Both mechanisms inject provider tokens as environment variables (`secretKeyRef` 
 
 ## Metrics
 
-Switchyard exposes a set of Prometheus metrics (request/error counters, latency histograms, etc.). When the `ServiceMonitor` is enabled, Prometheus scrapes them automatically, and with `grafanaDashboard.enabled=true` the shipped Grafana dashboard visualises:
+Switchyard exposes a set of Prometheus metrics (request/error counters, latency histograms, etc.). When the chart's `ServiceMonitor` is enabled, Prometheus scrapes them automatically, and with `grafanaDashboard.enabled=true` the shipped Grafana dashboard visualises:
 
 - Request rate
 - Error rate
@@ -150,6 +147,6 @@ Switchyard exposes a set of Prometheus metrics (request/error counters, latency 
 
 ## Notes
 
-- Switchyard is pre-alpha upstream. Pin/upgrade by setting `switchyard.image.tag` to a fork pipeline tag (`sha-<commit>` or an upstream `vX.Y.Z`); the default `main` rolls with every push to the fork. Rebuilding from `switchyard/Dockerfile` is only for clusters that cannot reach ghcr.io.
+- Switchyard is pre-alpha upstream. Pin/upgrade by setting `switchyard.image.tag` to a fork pipeline tag (`sha-<commit>` or an upstream `vX.Y.Z`); the default `main` rolls with every push to the fork.
 - The server image builds for `x86-64-v3` (AVX2) on amd64 and `neoverse-n1` on arm64 (rustflags from the upstream `.cargo/config.toml`, inherited via the git clone). Adjust the Dockerfile if you need a different target.
 - This deployment is intended for development/testing. For production you should add TLS, stricter RBAC, and external secret management.
