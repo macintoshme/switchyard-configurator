@@ -1,6 +1,6 @@
 # NeMo Switchyard Helm chart
 
-This repository provides a Helm chart to deploy **NVIDIA NeMo Switchyard** and its web configurator on a Kubernetes cluster. The chart bundles the Switchyard proxy, the FastAPI configurator UI, and (optionally) native Prometheus `ServiceMonitor` and Grafana dashboard resources.
+This repository provides a Helm chart to deploy **NVIDIA NeMo Switchyard** and its web configurator on a Kubernetes cluster. The chart bundles the Switchyard proxy, the FastAPI configurator UI, and (optionally) native Prometheus `ServiceMonitor` and Grafana dashboard resources. Requires **Helm 4+** (the chart relies on server-side apply — e.g. `--create-namespace` coexisting with the chart's own `Namespace` resource).
 
 ## Services
 
@@ -32,30 +32,30 @@ helm upgrade --install switchyard oci://ghcr.io/macintoshme/charts/switchyard \
   --set configurator.image.registry=ghcr.io/macintoshme
 ```
 
-> Note: ghcr.io packages are **private by default** on first publish. Flip them to public in the package settings (or add `imagePullSecrets`) if installs should work unauthenticated.
+> Note: the published artifacts are publicly pullable. If you fork this repo, packages pushed by your workflows may start **private** — check the visibility in the ghcr.io package settings (or add `imagePullSecrets`) before expecting unauthenticated installs.
 
 ## Building and pushing the images (local development)
 
 For local development or clusters that cannot reach ghcr.io, build and push the images yourself. On any cluster whose nodes cannot see your local Docker daemon you must push them to a registry the cluster can reach and point the chart at it.
 
-1. **Build** (from the repo root):
+1. **Build** (from the repo root). Tag both images with the **chart version** (the chart's default image tags follow `appVersion` — currently `v0.2.6`); the server binary itself is built from the pinned upstream tag (`v0.2.0`):
    ```bash
    # Switchyard server: multi-stage Rust build of the pinned upstream tag
-   docker build -t nemo-switchyard:v0.2.0 switchyard/
+   docker build -t nemo-switchyard:v0.2.6 switchyard/
 
    # Configurator: the build context is the repo root (-f), because the
    # image also copies the shared switchyard_config/ package
-   docker build -f configurator/Dockerfile -t nemo-switchyard-configurator:v0.2.0 .
+   docker build -f configurator/Dockerfile -t nemo-switchyard-configurator:v0.2.6 .
    ```
    Build a different upstream release with `--build-arg SWITCHYARD_VERSION=<git-tag>` (see `switchyard/Dockerfile`).
 
 2. **Push** both images to a registry your cluster can reach:
    ```bash
    REGISTRY=ghcr.io/your-org
-   docker tag  nemo-switchyard:v0.2.0              $REGISTRY/nemo-switchyard:v0.2.0
-   docker tag  nemo-switchyard-configurator:v0.2.0 $REGISTRY/nemo-switchyard-configurator:v0.2.0
-   docker push $REGISTRY/nemo-switchyard:v0.2.0
-   docker push $REGISTRY/nemo-switchyard-configurator:v0.2.0
+   docker tag  nemo-switchyard:v0.2.6              $REGISTRY/nemo-switchyard:v0.2.6
+   docker tag  nemo-switchyard-configurator:v0.2.6 $REGISTRY/nemo-switchyard-configurator:v0.2.6
+   docker push $REGISTRY/nemo-switchyard:v0.2.6
+   docker push $REGISTRY/nemo-switchyard-configurator:v0.2.6
    ```
 
 3. **Point the chart at them** via a values file:
@@ -64,7 +64,7 @@ For local development or clusters that cannot reach ghcr.io, build and push the 
      image:
        registry: ghcr.io/your-org
        repository: nemo-switchyard
-       tag: v0.2.0        # empty = chart appVersion
+       tag: v0.2.6        # empty = chart appVersion
    configurator:
      image:
        registry: ghcr.io/your-org
@@ -104,8 +104,9 @@ Clusters that can see your local images (e.g. Rancher Desktop with the dockerd r
    ```
    The UI lets you add providers, create routes, and save the configuration. Saving PATCHes the config `ConfigMap` (via the configurator's service account); if the Stakater Reloader is installed, its annotation on the switchyard `Deployment` rolls the pods so new routes are picked up, and every `helm upgrade` rolls them via a config checksum regardless. Provider tokens entered in the UI are persisted into a UI-managed Secret (`<release>-tokens`) that both deployments load via `envFrom`; the `ConfigMap` never contains token values. Disable this with `configurator.tokenSecret.enabled=false` to rely solely on the pre-provisioned `providers:` secretKeyRefs from step 1.
 
-4. **Verify** – check that Switchyard is healthy and serving metrics:
+4. **Verify** – check that Switchyard is healthy and serving metrics (port-forward the switchyard service first):
    ```bash
+   kubectl port-forward -n switchyard svc/switchyard 4000:4000
    curl http://localhost:4000/health
    curl http://localhost:4000/v1/models
    ```
@@ -113,29 +114,32 @@ Clusters that can see your local images (e.g. Rancher Desktop with the dockerd r
 
 ## Routes
 
-`switchyard/config/routes.toml.example` shows the configuration format: LLM clients, targets, and routes. Six route types are supported:
+`switchyard/config/routes.toml.example` shows the configuration format: LLM clients, targets, and routes. Eight route types are supported:
 
 - **Passthrough** – direct to a single target
 - **Random** – weighted A/B split across targets
 - **LLM classifier (capability)** – route based on model difficulty
 - **LLM classifier (escalation)** – similar to capability but with confirmations
+- **LLM classifier (custom)** – custom classifier with arbitrary targets, default target, and a policy selector
 - **Stage router** – selects a tier based on tool/agent signals
 - **Advisor gate** – executor runs, advisor reviews, then gates further execution
+- **Composite** – a classifier determines the tier, then a stage router selects the concrete model
 
 ## Error handling
 
-All API endpoints return JSON `{ "ok": true }` on success. On validation errors the response is `{ "ok": false, "field": "<field>", "error": "<message>" }` with HTTP 400.
+Action endpoints (save, preview, probe, provider/route/model edits) return JSON `{ "ok": true }` on success and `{ "ok": false, "error": "<message>" }` (sometimes with a `"title"` for the dialog heading) on failure — always with HTTP 200. The read-only endpoints (`/api/state`, `/api/status`, `/api/health`, `/api/model-hints`) return their payload directly without an `ok` wrapper.
 
 ## Provider configuration
 
-Providers are defined in the UI (or via the Helm `values.yaml`). Each provider needs:
+Providers are added in the configurator UI: each needs a `name`, an `endpoint` (OpenAI-compatible `/v1` base URL), and optionally an `api_key_env` (the env var that will hold the token) plus the token itself. Tokens entered in the UI are persisted to the `<release>-tokens` Secret on save (see step 3 above).
 
-- `name` – internal identifier used in the routing table
-- `envVar` – the environment variable name that will contain the API key (e.g., `MY_PROVIDER_TOKEN`)
+Alternatively, pre-provision tokens out of band and wire them via the chart's `providers:` values (the `envVar` must match the `api_key_env` in your routes file):
+
+- `envVar` – the environment variable name that will contain the API key (e.g., `OPENAI_API_KEY`)
 - `secret` – the name of the Kubernetes `Secret` that stores the token
 - `secretKey` – the key inside the `Secret` (default `token`)
 
-The UI and the chart inject provider tokens as environment variables via `secretKeyRef` (pre-provisioned) or the UI-managed `<release>-tokens` Secret (entered in the web UI); nothing is written to the `ConfigMap` or any file.
+Both mechanisms inject provider tokens as environment variables (`secretKeyRef` or the UI-managed Secret via `envFrom`); nothing is written to the `ConfigMap` or any file.
 
 ## Metrics
 
