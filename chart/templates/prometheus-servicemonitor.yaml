@@ -3,15 +3,16 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "switchyard.fullname" . }}-monitor
+  namespace: {{ include "switchyard.namespace" . }}
   labels:
-    {{- include "switchyard.labels" . | nindent 4 }}
+    {{- include "switchyard.labels" (dict "root" . "component" "server") | nindent 4 }}
     {{- with .Values.serviceMonitor.additionalLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   selector:
     matchLabels:
-      {{- include "switchyard.labels" . | nindent 6 }}
+      {{- include "switchyard.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
   endpoints:
     - port: http
       interval: {{ .Values.serviceMonitor.interval }}

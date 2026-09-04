@@ -1,19 +1,18 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "switchyard.fullname" . }}-config
+  name: {{ include "switchyard.configMapName" . }}
+  namespace: {{ include "switchyard.namespace" . }}
   labels:
-    app.kubernetes.io/name: {{ include "switchyard.fullname" . }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "switchyard.labels" (dict "root" . "component" "server") | nindent 4 }}
 
+{{- /* The configurator rewrites routes.toml (and adds provider_meta.json) in
+     this ConfigMap whenever the user saves. Helm 4 upgrades with server-side
+     apply, so once the ConfigMap exists we must stop rendering the default
+     here or every upgrade conflicts with (or clobbers) the saved config. */}}
+{{- $existing := lookup "v1" "ConfigMap" (include "switchyard.namespace" .) (include "switchyard.configMapName" .) }}
+{{- if not $existing }}
 data:
   routes.toml: |
 {{ .Values.routesToml | nindent 4 }}
-  .env: |
-{{- range .Values.providers }}
-{{- if .secret }}
-    {{ .envVar }}='{{ (lookup "v1" "Secret" $.Release.Namespace .secret).data (default "token" .secretKey) | default "" | b64dec }}'
-{{- else }}
-    {{ .envVar }}=''
-{{- end }}
 {{- end }}

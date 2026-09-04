@@ -2,8 +2,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "switchyard.fullname" . }}
+  namespace: {{ include "switchyard.namespace" . }}
   labels:
-    {{- include "switchyard.labels" . | nindent 4 }}
+    {{- include "switchyard.labels" (dict "root" . "component" "server") | nindent 4 }}
   {{- if .Values.reloader.enabled }}
   annotations:
     reloader.stakater.com/auto: "true"
@@ -12,21 +13,43 @@ spec:
   replicas: {{ .Values.switchyard.replicaCount }}
   selector:
     matchLabels:
-      {{- include "switchyard.labels" . | nindent 6 }}
+      {{- include "switchyard.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "switchyard.labels" . | nindent 8 }}
+        {{- include "switchyard.labels" (dict "root" . "component" "server") | nindent 8 }}
+      annotations:
+        # Roll pods on ConfigMap changes even without Stakater Reloader.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: switchyard
-          image: "{{ .Values.switchyard.image }}"
+          image: "{{ include "switchyard.image" . }}"
           imagePullPolicy: {{ .Values.switchyard.pullPolicy }}
           ports:
             - containerPort: {{ .Values.switchyard.port }}
+          env:
+            - name: SWITCHYARD_PORT
+              value: "{{ .Values.switchyard.port }}"
+            {{- include "switchyard.providerEnv" $ | nindent 12 }}
+          {{- if include "switchyard.tokenSecretEnabled" . }}
+          # Provider tokens entered in the configurator web UI: the
+          # configurator upserts them into this Secret on save; Stakater
+          # Reloader (auto mode) rolls the pods when it changes.
           envFrom:
-            - configMapRef:
-                name: {{ include "switchyard.fullname" . }}-config
+            - secretRef:
+                name: {{ include "switchyard.tokenSecretName" . }}
+                optional: true
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/switchyard
@@ -43,12 +66,14 @@ spec:
               port: {{ .Values.switchyard.port }}
             initialDelaySeconds: 15
             periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
       volumes:
         - name: config
           configMap:
-            name: {{ include "switchyard.fullname" . }}-config
+            name: {{ include "switchyard.configMapName" . }}
             items:
               - key: routes.toml
                 path: routes.toml
-              - key: .env
-                path: .env

@@ -11,7 +11,7 @@ This document describes security considerations for running the Switchyard confi
 The configurator container can optionally mount the host Docker socket (`/var/run/docker.sock`). This enables the UI to restart the Switchyard service via `docker compose restart switchyard`.
 
 ### Risks
-- **Root‑level access**: The socket grants the container the same privileges as the Docker daemon on the host, effectively full root access.
+- **Root-level access**: The socket grants the container the same privileges as the Docker daemon on the host, effectively full root access.
 - **Container breakout**: A compromised configurator could spawn containers, mount host filesystems, or modify existing containers.
 
 ### Mitigations
@@ -20,7 +20,7 @@ The configurator container can optionally mount the host Docker socket (`/var/ru
    - Run the Docker daemon with `-H tcp://0.0.0.0:2376` and configure TLS certificates.
    - Mount the TLS certificates into the configurator and set `DOCKER_HOST=tcp://host:2376`.
    - Restrict access to the API via firewall rules.
-3. **Run as non‑root**: The Dockerfile creates a non‑root user; ensure the process runs as that user with only needed capabilities.
+3. **Run as non-root**: The Dockerfile creates a non-root user; ensure the process runs as that user with only needed capabilities.
 4. **Restrict socket permissions**: If the socket must be mounted, change its group ownership to a dedicated group and add the configurator user to that group.
 
 ---
@@ -28,7 +28,7 @@ The configurator container can optionally mount the host Docker socket (`/var/ru
 ## 2. Secret Handling
 
 - **Never store secrets in the repository**. Use Docker secrets, Kubernetes secrets, or environment variables injected at runtime.
-- **Avoid plain‑text `.env` files** in production. If needed for local development, add them to `.gitignore`.
+- **Avoid plain-text `.env` files** in production. If needed for local development, add them to `.gitignore`.
 - **Limit environment variable exposure**: Run the configurator with the minimal set of env vars; do not expose secrets to child processes.
 
 ---
@@ -43,17 +43,17 @@ The configurator container can optionally mount the host Docker socket (`/var/ru
 
 ## 4. Runtime Hardening
 
-- **Enable OS‑level security**: Use Docker `--security-opt=no-new-privileges` and `--cap-drop=ALL` where possible.
-- **Set resource limits** (`cpu`, `memory`) for the configurator container to mitigate DoS.
-- **Update dependencies regularly**: Run `pip list --outdated` and apply security patches.
+- **Enable OS-level security**: Use `--security-opt=no-new-privileges` and `--cap-drop=ALL` on every container in the deployment.
+- **Set resource limits** (`cpu`, `memory`) for the configurator pod so a single request storm cannot exhaust node resources.
+- **Update dependencies on a schedule**: run `pip list --outdated` at least monthly and patch any dependency with a published CVE.
 - **Log sanitization**: Ensure logs do not contain secrets; the configurator logs use the `LOG_LEVEL` env var and avoid printing sensitive data.
 
 ---
 
 ## 5. Monitoring & Auditing
 
-- **Collect metrics** via the built‑in Prometheus exporter (`agents/metrics_exporter.py`).
-- **Audit container logs** for abnormal activity.
+- **Collect metrics** via Switchyard's own `/metrics` endpoint; the chart's `ServiceMonitor` makes Prometheus scrape it when `serviceMonitor.enabled=true`.
+- **Audit container logs** for unexpected restarts, failed image pulls, and non-4xx spikes in the request/error counters.
 - **Use image scanning** (e.g., Trivy, Clair) in CI to detect known CVEs.
 
 ---
@@ -64,7 +64,3 @@ The configurator container can optionally mount the host Docker socket (`/var/ru
 2. **Stop the container** and remove the Docker socket mount if present.
 3. **Investigate logs** and run a forensics scan on the host.
 4. **Restore from a clean image** built from a trusted base.
-
----
-
-**By following these guidelines you reduce the attack surface of the Switchyard configurator and protect the host environment from potential container‑based compromises.**

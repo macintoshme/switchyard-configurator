@@ -1,7 +1,6 @@
 .git
 .env
 .env.*
-opencode.json
 switchyard/config/routes.toml
 switchyard/config/provider_meta.json
 *.draft

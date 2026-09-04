@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .state import manager
+from switchyard_config import hints as model_hints
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -59,6 +60,11 @@ class ProviderPayload(BaseModel):
 
 class RoutePayload(BaseModel):
     route: dict
+
+
+class ModelExtrasPayload(BaseModel):
+    model: str
+    extra_body: dict
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +152,20 @@ def delete_route(index: int) -> dict:
 @app.post("/api/sync")
 def sync() -> dict:
     return manager.resync()
+
+
+# ---------------------------------------------------------------------------
+# Models (per-model extra_body / capability settings)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/model-hints")
+def get_model_hints() -> dict:
+    return model_hints.load_model_hints()
+
+
+@app.post("/api/models/extras")
+def set_model_extras(payload: ModelExtrasPayload) -> dict:
+    return manager.set_model_extras(payload.model, payload.extra_body)
 
 
 # ---------------------------------------------------------------------------

@@ -10,19 +10,22 @@ block other requests.
 from __future__ import annotations
 
 # Applied from the same shell fallback chain as the TUI.
+import json
 import os
-import re
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from switchyard_config import constants as C
+from switchyard_config import hints as model_hints
+from switchyard_config import kube
 from switchyard_config.endpoints import (
     fetch_models_from_endpoint,
     is_switchyard_running,
     probe_endpoint,
     restart_switchyard,
 )
+from switchyard_config.files import clear_draft, rotate_backups, write_draft
 from switchyard_config.models import (
     ROUTE_TYPE_KEYS,
     ROUTE_TYPES,
@@ -30,10 +33,12 @@ from switchyard_config.models import (
     Provider,
     Route,
 )
-from switchyard_config.opencode import clear_draft, rotate_backups, write_draft
 from switchyard_config.providers import (
+    apply_provider_meta,
+    apply_provider_meta_dict,
     load_provider_meta,
     provider_display_name,
+    provider_meta_json,
     save_provider_meta,
 )
 from switchyard_config.routes import (
@@ -41,6 +46,7 @@ from switchyard_config.routes import (
     find_route_cycles,
     generate_toml,
     load_existing_routes,
+    parse_routes_text,
     read_env_var_from,
     sync_self_provider,
     update_env_file,
@@ -61,30 +67,6 @@ def _run_validator(func, *args, **kwargs):
     except ValidationError as e:
         return e.message
     return None
-
-
-def guess_capabilities(model_id: str) -> dict:
-    """Return a heuristic capability dict for a model.
-    Currently supports a few known families; defaults to all ``false``.
-    """
-    caps = {
-        "supports_images": False,
-        "supports_tools": False,
-        "supports_audio": False,
-        "supports_video": False,
-        "supports_files": False,
-    }
-    lower = model_id.lower()
-    # Vision models contain the word "vision"
-    if "vision" in lower:
-        caps["supports_images"] = True
-    # Gemma‑4 family – no multimodal support currently
-    if "gemma-4-" in lower:
-        caps["supports_images"] = False
-    # Qwen‑3 family – also non‑vision (placeholder for future extensions)
-    if lower.startswith("qwen3"):
-        caps["supports_images"] = False
-    return caps
 
 def display_path(p: str) -> str:
     """Show container paths as host-relative (the container mounts the repo at /app)."""
@@ -621,30 +603,67 @@ class ConfigManager:
     # --- Initial load (mirrors SwitchyardConfigApp.__init__) ---
 
     def _load_initial(self) -> None:
-        existing_routes, providers, routes_err = load_existing_routes(C.ROUTES_TOML)
+        routes_err: str | None = None
+        meta: dict = {}
+        model_extras: dict[str, dict] = {}
+
+        if kube.in_cluster():
+            # Kubernetes: the ConfigMap is the source of truth. First apply
+            # the code-maintained seed ConfigMap if it changed (see kube.py).
+            try:
+                note = kube.sync_seed()
+                if note:
+                    print(f"[seed-sync] {note}")
+            except RuntimeError as e:
+                self.load_errors.append(str(e))
+            data = kube.load_config_data()
+            existing_routes, providers, model_extras, routes_err = parse_routes_text(
+                data.get("routes.toml", ""), source="routes.toml"
+            )
+            try:
+                parsed_meta = json.loads(data.get("provider_meta.json") or "{}")
+                meta = parsed_meta if isinstance(parsed_meta, dict) else {}
+            except json.JSONDecodeError:
+                meta = {}
+        else:
+            existing_routes, providers, model_extras, routes_err = (
+                load_existing_routes(C.ROUTES_TOML)
+            )
+
         if existing_routes:
             self.state.routes = existing_routes
         self.state.providers = providers
 
         draft_err: str | None = None
         if C.ROUTES_DRAFT.exists():
-            draft_routes, draft_providers, draft_err = load_existing_routes(C.ROUTES_DRAFT)
+            draft_routes, draft_providers, draft_extras, draft_err = (
+                load_existing_routes(C.ROUTES_DRAFT)
+            )
             if draft_routes or draft_providers:
                 self.state.routes = draft_routes
                 self.state.providers = draft_providers
+                model_extras = draft_extras
                 self.draft_recovered = True
+
+        self.state.model_extras = model_extras
 
         self.load_errors = list(
             dict.fromkeys(msg for msg in (routes_err, draft_err) if msg)
         )
 
-        # Apply provider display names from the sidecar metadata file.
-        meta_path = C.PROVIDER_META_DRAFT if C.PROVIDER_META_DRAFT.exists() else C.PROVIDER_META_FILE
-        if meta_path.exists():
-            from switchyard_config.providers import apply_provider_meta
-            apply_provider_meta(self.state.providers, meta_path)
+        # Apply provider display names from the sidecar metadata. Draft
+        # metadata wins when a draft was recovered; otherwise the live
+        # source (ConfigMap in Kubernetes, sidecar file locally).
+        if C.PROVIDER_META_DRAFT.exists():
+            apply_provider_meta(self.state.providers, C.PROVIDER_META_DRAFT)
+        elif kube.in_cluster():
+            apply_provider_meta_dict(self.state.providers, meta)
+        elif C.PROVIDER_META_FILE.exists():
+            apply_provider_meta(self.state.providers, C.PROVIDER_META_FILE)
 
-        # Fill API keys: draft .env, then .env, then the shell env.
+        # Fill API keys: draft .env, then the shell env, then .env.
+        # In Kubernetes the shell env holds the tokens injected via
+        # secretKeyRef from the providers' Secrets.
         for p in self.state.providers:
             if not p.api_key and p.api_key_env:
                 p.api_key = read_env_var_from(C.ENV_DRAFT, p.api_key_env)
@@ -685,17 +704,60 @@ class ConfigManager:
             "passthrough_count": passthrough_count,
             "selected_models": list(s.selected_models),
             "available_models": list(s.available_models),
-            "model_capabilities": {model: guess_capabilities(model) for model in s.available_models},
+            "models": self._models_summary(),
             "broken_route_indices": broken_route_indices(s),
             "cycles": find_route_cycles(s),
             "draft_recovered": self.draft_recovered,
             "load_errors": list(self.load_errors),
             "has_unsaved_changes": self.has_unsaved_changes(),
-            "files": {
-                "routes": display_path(str(C.ROUTES_TOML)),
-                "env": display_path(str(C.ENV_FILE)),
-                "meta": display_path(str(C.PROVIDER_META_FILE)),
-            },
+            "files": self._file_refs(),
+        }
+
+    def _models_summary(self) -> list[dict]:
+        """Per-model rows for the Models tab: selected models of real
+        (non-self) providers with their extra_body settings. The synthetic
+        self provider (route chaining) is skipped — it has no upstream to
+        tune. A model offered by several providers is listed once (first
+        provider wins, matching target generation).
+
+        Each row carries the matching hint (if any) from the definitions
+        file. Matching happens here rather than in the browser because
+        the patterns are Python-flavored regexes (e.g. ``(?i)`` inline
+        flags) that JavaScript's RegExp rejects."""
+        loaded = model_hints.load_model_hints()
+        hint_list = loaded.get("hints", [])
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for p in self.state.providers:
+            if p.name == C.SELF_PROVIDER_NAME:
+                continue
+            for m in p.selected_models:
+                if m in seen:
+                    continue
+                seen.add(m)
+                rows.append({
+                    "model": m,
+                    "provider": p.name,
+                    "provider_label": provider_display_name(p),
+                    "extra_body": dict(self.state.model_extras.get(m, {})),
+                    "hint": model_hints.match_hint(m, hint_list),
+                })
+        return rows
+
+    @staticmethod
+    def _file_refs() -> dict[str, str]:
+        """Where the config lives: ConfigMap in Kubernetes, files locally."""
+        if kube.in_cluster():
+            name = kube.configmap_name()
+            return {
+                "routes": f"configmap/{name}: routes.toml",
+                "env": "Kubernetes Secrets (providers[].secret)",
+                "meta": f"configmap/{name}: provider_meta.json",
+            }
+        return {
+            "routes": display_path(str(C.ROUTES_TOML)),
+            "env": display_path(str(C.ENV_FILE)),
+            "meta": display_path(str(C.PROVIDER_META_FILE)),
         }
 
     def _state_with_passthrough(self) -> ConfigState:
@@ -715,12 +777,14 @@ class ConfigManager:
 
     def preview(self) -> dict:
         preview_state = self._state_with_passthrough()
+        refs = self._file_refs()
         return {
+            "ok": True,
             "toml": generate_toml(preview_state),
             "env": update_env_file(preview_state.providers),
-            "routes_path": display_path(str(C.ROUTES_TOML)),
-            "env_path": display_path(str(C.ENV_FILE)),
-            "meta_path": display_path(str(C.PROVIDER_META_FILE)),
+            "routes_path": refs["routes"],
+            "env_path": refs["env"],
+            "meta_path": refs["meta"],
         }
 
     def has_unsaved_changes(self) -> bool:
@@ -849,10 +913,106 @@ class ConfigManager:
             write_draft(self.state)
             return {"ok": True, "state": self.snapshot()}
 
+    # --- Model extras (Models tab) ---
+
+    # extra_body key: a TOML bare key segment (no dots/braces/quotes), so
+    # the generated [targets.X.extra_body] table stays readable.
+    _EXTRA_KEY_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+    _MAX_EXTRA_KEYS = 24
+    _MAX_EXTRA_JSON = 2048  # serialized size cap per model
+
+    def set_model_extras(self, model: str, extra_body: object) -> dict:
+        """Set (or clear, when empty) a model's extra_body.
+
+        Values may be bool/int/float/str scalars or JSON-style nested
+        structures (the free-form rows' "json" type) — everything the
+        server's ``extra_body: BTreeMap<String, Value>`` accepts. Stored
+        on the state and round-tripped through routes.toml on save.
+        """
+        with self._lock:
+            model = (model or "").strip()
+            if not model:
+                return {"ok": False, "error": "Model is required"}
+            if model not in self.state.selected_models:
+                return {"ok": False, "error": f"Unknown or unselected model '{model}'"}
+            if not isinstance(extra_body, dict):
+                return {"ok": False, "error": "extra_body must be an object"}
+
+            cleaned: dict = {}
+            for key, value in extra_body.items():
+                if not isinstance(key, str) or not self._EXTRA_KEY_RE.fullmatch(key):
+                    return {"ok": False, "error":
+                            f"Invalid extra key '{key}' - use letters, digits, '_' or '-'"}
+                if len(key) > 64:
+                    return {"ok": False, "error": f"Extra key '{key}' is longer than 64 chars"}
+                if key in cleaned:
+                    return {"ok": False, "error": f"Duplicate extra key '{key}'"}
+                err = self._validate_extra_value(value, f"Value for '{key}'")
+                if err:
+                    return {"ok": False, "error": err}
+                cleaned[key] = value
+            if len(cleaned) > self._MAX_EXTRA_KEYS:
+                return {"ok": False, "error":
+                        f"At most {self._MAX_EXTRA_KEYS} extra keys per model"}
+            try:
+                if len(json.dumps(cleaned)) > self._MAX_EXTRA_JSON:
+                    return {"ok": False, "error": "Extras are too large "
+                            f"(>{self._MAX_EXTRA_JSON} bytes serialized)"}
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "Extras are not valid JSON values"}
+
+            if cleaned:
+                self.state.model_extras[model] = cleaned
+            else:
+                self.state.model_extras.pop(model, None)
+            write_draft(self.state)
+            return {
+                "ok": True,
+                "notification": f"Model settings saved for {model}",
+                "state": self.snapshot(),
+            }
+
+    @classmethod
+    def _validate_extra_value(cls, value: object, label: str) -> str | None:
+        """Recursively validate an extra_body value; return an error or None."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) or isinstance(value, float):
+            return None
+        if isinstance(value, str):
+            if _run_validator(validate_toml_string_value, value, label):
+                return f"{label} may not contain double quotes, backslashes, or control characters"
+            return None
+        if isinstance(value, list):
+            if len(value) > 32:
+                return f"{label}: lists are limited to 32 items"
+            for item in value:
+                err = cls._validate_extra_value(item, label)
+                if err:
+                    return err
+            return None
+        if isinstance(value, dict):
+            if len(value) > 32:
+                return f"{label}: objects are limited to 32 keys"
+            for k, v in value.items():
+                if not isinstance(k, str) or not k:
+                    return f"{label}: object keys must be non-empty strings"
+                err = cls._validate_extra_value(v, f"{label}.{k}")
+                if err:
+                    return err
+            return None
+        return f"{label}: unsupported type (use true/false, number, string, or JSON)"
+
     # --- Save / restart ---
 
     def save(self) -> dict:
-        """Validate and write routes.toml, .env, provider_meta.json.
+        """Validate and persist the configuration.
+
+        In Kubernetes, ``routes.toml`` / ``provider_meta.json`` are PATCHed
+        into the config ConfigMap; provider tokens entered in the UI are
+        upserted into the UI-managed token Secret, which both deployments
+        load via ``envFrom`` (locally the original ``.env`` file is kept).
+
         The TUI automatically added missing passthrough routes before saving; the
         web UI now mirrors that behaviour by generating them on‑the‑fly.
         """
@@ -868,34 +1028,15 @@ class ConfigManager:
                 )
                 return {"ok": False, "error": err, "title": title}
             try:
-                routes_bak = rotate_backups(C.ROUTES_TOML)
-                env_bak = rotate_backups(C.ENV_FILE)
-                meta_bak = (
-                    rotate_backups(C.PROVIDER_META_FILE)
-                    if load_provider_meta(C.PROVIDER_META_FILE)
-                    else None
-                )
-                C.ROUTES_TOML.parent.mkdir(parents=True, exist_ok=True)
-                C.ROUTES_TOML.write_text(generate_toml(temp_state))
-                C.ENV_FILE.write_text(update_env_file(temp_state.providers))
-                save_provider_meta(temp_state.providers, C.PROVIDER_META_FILE)
+                if kube.in_cluster():
+                    lines = self._save_to_configmap(temp_state)
+                else:
+                    lines = self._save_to_files(temp_state)
                 clear_draft()
                 self.draft_recovered = False
-            except OSError as e:
+            except (OSError, RuntimeError) as e:
                 return {"ok": False, "error": f"Save failed: {e}", "title": "Save Failed"}
 
-            lines = [
-                display_path(str(C.ROUTES_TOML)),
-                display_path(str(C.ENV_FILE)),
-                display_path(str(C.PROVIDER_META_FILE)),
-            ]
-            for name, bak in (
-                ("routes", routes_bak),
-                ("env", env_bak),
-                ("meta", meta_bak),
-            ):
-                if bak:
-                    lines.append(f"Backup {name}: {display_path(str(bak))}")
             return {
                 "ok": True,
                 "message": "Configuration saved!",
@@ -903,6 +1044,64 @@ class ConfigManager:
                 "restart_available": is_switchyard_running(),
                 "state": self.snapshot(),
             }
+
+    def _save_to_configmap(self, temp_state: ConfigState) -> list[str]:
+        """Persist routes.toml + provider_meta.json into the config ConfigMap.
+
+        Provider tokens entered in the UI go into the UI-managed token
+        Secret (``kube.upsert_token_secret``), from where both deployments
+        load them via ``envFrom`` — without this the values would only
+        exist in memory and the ephemeral draft.
+        """
+        toml_text = generate_toml(temp_state)
+        meta_text = provider_meta_json(temp_state.providers)
+        data = {"routes.toml": toml_text}
+        if meta_text:
+            data["provider_meta.json"] = meta_text
+        kube.patch_config_data(data)
+        name = kube.configmap_name()
+        lines = [f"configmap/{name}: routes.toml"]
+        if meta_text:
+            lines.append(f"configmap/{name}: provider_meta.json")
+        tokens = {
+            p.api_key_env: p.api_key
+            for p in temp_state.providers
+            if p.api_key_env and p.api_key
+        }
+        if tokens:
+            kube.upsert_token_secret(tokens)
+            lines.append(
+                f"secret/{kube.token_secret_name()}: "
+                + ", ".join(sorted(tokens))
+            )
+        return lines
+
+    def _save_to_files(self, temp_state: ConfigState) -> list[str]:
+        """Original local save: write files with timestamped backups."""
+        routes_bak = rotate_backups(C.ROUTES_TOML)
+        env_bak = rotate_backups(C.ENV_FILE)
+        meta_bak = (
+            rotate_backups(C.PROVIDER_META_FILE)
+            if load_provider_meta(C.PROVIDER_META_FILE)
+            else None
+        )
+        C.ROUTES_TOML.parent.mkdir(parents=True, exist_ok=True)
+        C.ROUTES_TOML.write_text(generate_toml(temp_state))
+        C.ENV_FILE.write_text(update_env_file(temp_state.providers))
+        save_provider_meta(temp_state.providers, C.PROVIDER_META_FILE)
+        lines = [
+            display_path(str(C.ROUTES_TOML)),
+            display_path(str(C.ENV_FILE)),
+            display_path(str(C.PROVIDER_META_FILE)),
+        ]
+        for name, bak in (
+            ("routes", routes_bak),
+            ("env", env_bak),
+            ("meta", meta_bak),
+        ):
+            if bak:
+                lines.append(f"Backup {name}: {display_path(str(bak))}")
+        return lines
 
     def restart(self) -> dict:
         ok, msg = restart_switchyard()
@@ -912,6 +1111,9 @@ class ConfigManager:
         return {
             "switchyard_running": is_switchyard_running(),
             "has_unsaved_changes": self.has_unsaved_changes(),
+            # "kubernetes" when deployed by this chart (it sets
+            # DEPLOYMENT_PLATFORM); empty for local/compose runs.
+            "platform": os.environ.get("DEPLOYMENT_PLATFORM", ""),
         }
 
     def cycles(self) -> list[list[str]]:

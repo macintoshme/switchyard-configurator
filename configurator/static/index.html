@@ -24,6 +24,7 @@
   <nav class="tabs" id="tabs" role="tablist">
     <button class="tab active" data-tab="overview" role="tab" aria-controls="pane-overview" aria-selected="true">Overview</button>
     <button class="tab" data-tab="providers" role="tab" aria-controls="pane-providers" aria-selected="false">Providers</button>
+    <button class="tab" data-tab="models" role="tab" aria-controls="pane-models" aria-selected="false">Models</button>
     <button class="tab" data-tab="routes" role="tab" aria-controls="pane-routes" aria-selected="false">Routes</button>
     <button class="tab" data-tab="review" role="tab" aria-controls="pane-review" aria-selected="false">Review &amp; Save</button>
   </nav>
@@ -34,6 +35,9 @@
 
     <!-- Providers -->
     <section id="pane-providers" class="pane"></section>
+
+    <!-- Models -->
+    <section id="pane-models" class="pane"></section>
 
     <!-- Routes -->
     <section id="pane-routes" class="pane"></section>
@@ -53,25 +57,23 @@
         <div class="grid2">
           <label>Local name
             <input id="p-name" placeholder="openai" />
+            <span class="help">TOML key in routes.toml ([llm_clients.&lt;name&gt;]); routes reference the provider by this name. Keep it short, no spaces.</span>
           </label>
           <label>Display name
             <input id="p-display" placeholder="OpenAI (optional)" />
+            <span class="help">Cosmetic label for this UI only. Left empty, a readable name is derived from the local name (e.g. "lm_studio" &rarr; "LM Studio").</span>
           </label>
         </div>
         <label>Endpoint
           <input id="p-endpoint" placeholder="https://api.openai.com/v1 or host:port" />
         </label>
-        <div class="grid2">
-          <label>API key
-            <div class="key-row">
-              <input id="p-apikey" type="password" placeholder="sk-... (blank = no auth)" autocomplete="off" />
-              <button type="button" class="tiny" id="p-key-toggle" aria-label="Show API key">show</button>
-            </div>
-          </label>
-          <label>Env var
-            <input id="p-envvar" placeholder="OPENAI_API_KEY" />
-          </label>
-        </div>
+        <label>API key
+          <div class="key-row">
+            <input id="p-apikey" type="password" placeholder="sk-... (blank = no auth)" autocomplete="off" />
+            <button type="button" class="tiny" id="p-key-toggle" aria-label="Show API key">show</button>
+          </div>
+          <span class="help" id="p-envvar-hint"></span>
+        </label>
         <label>Max retries
           <input id="p-retries" type="number" min="0" value="2" />
         </label>
@@ -79,7 +81,7 @@
         <div class="probe-row">
           <button class="btn" id="p-probe">Test &amp; Fetch Models</button>
           <button class="btn ghost" id="p-refresh" title="Refresh models for all saved providers">Refresh all</button>
-          <span id="p-probe-status" class="probe-status"></span>
+          <span id="p-probe-status" class="probe-status" aria-live="polite"></span>
         </div>
 
         <div id="p-models-section" class="hidden">
@@ -114,9 +116,11 @@
         <div class="grid2">
           <label>Local name
             <input id="r-name" placeholder="smart (TOML table key)" />
+            <span class="help">TOML key for this route ([routes.&lt;name&gt;]); internal, never seen by clients.</span>
           </label>
           <label>Route ID
             <input id="r-id" placeholder="switchyard/smart (model clients send)" />
+            <span class="help">The model ID clients put in their "model" field; other routes pick their targets from these IDs.</span>
           </label>
         </div>
         <label>Type
@@ -440,6 +444,33 @@
       <div class="modal-foot">
         <button class="btn ghost" data-close="route-modal">Cancel</button>
         <button class="btn primary" id="r-save">Save Route</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model settings modal -->
+  <div id="model-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="model-modal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="model-modal-title">Model Settings</h2>
+        <button class="icon-btn" data-close="model-modal" title="Close" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="help" id="m-provider"></p>
+        <div id="m-hint-box" class="card hint-box hidden"></div>
+
+        <div class="subhead">Capabilities</div>
+        <p class="help">What this model accepts. Stored as <code>supports_*</code> keys in the target's <code>extra_body</code>; the switchyard translation layer passes content through by default, so these serve extension policies and documentation. Use the select to leave a capability unset, allow it, or explicitly block it.</p>
+        <div id="m-capabilities" class="cap-grid"></div>
+
+        <div class="subhead">Extra request parameters</div>
+        <p class="help">Merged into every request body sent to this model's provider (e.g. <code>top_k</code> or <code>repetition_penalty</code> for vLLM, <code>service_tier</code> for OpenAI). Permissive backends ignore unknown keys; strict APIs may reject them — only add params the provider understands.</p>
+        <div id="m-extras"></div>
+        <button type="button" class="btn small" id="m-add-extra">+ Add parameter</button>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-close="model-modal">Cancel</button>
+        <button class="btn primary" id="m-save">Save Model Settings</button>
       </div>
     </div>
   </div>

@@ -183,32 +183,46 @@ def validate_weights(
 
 def load_existing_routes(
     path: Path,
-) -> tuple[list[Route], list[Provider], str | None]:
-    """Parse an existing routes.toml into routes + providers.
+) -> tuple[list[Route], list[Provider], dict[str, dict], str | None]:
+    """Parse an existing routes.toml file into routes + providers + extras.
 
-    Returns ``(routes, providers, error)``. Each ``[llm_clients.*]`` block
+    Returns ``(routes, providers, model_extras, error)``. On a TOML parse
+    error, returns ``([], [], {}, error_message)`` so the caller can surface
+    the problem instead of silently treating a corrupt file as empty. A
+    missing file is not an error — returns ``([], [], {}, None)``.
+    """
+    if not path.exists():
+        return [], [], {}, None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return [], [], {}, f"{path.name}: {e}"
+    return parse_routes_text(text, source=path.name)
+
+
+def parse_routes_text(
+    text: str, source: str = "routes.toml"
+) -> tuple[list[Route], list[Provider], dict[str, dict], str | None]:
+    """Parse routes.toml content into routes + providers + extras.
+
+    Text-based twin of :func:`load_existing_routes` for sources that are not
+    files (e.g. a Kubernetes ConfigMap). Each ``[llm_clients.*]`` block
     becomes a Provider. Models are pulled from targets and assigned to the
     provider referenced by each target's ``llm_client`` field, so the user
-    can edit routes without re-fetching.
+    can edit routes without re-fetching. Each target's ``extra_body`` (if
+    any) is collected into a ``model id -> dict`` map.
 
-    On a TOML parse error, returns ``([], [], error_message)`` so the
-    caller can surface the problem instead of silently treating a corrupt
-    file as empty. A missing file is not an error — returns ``([], [], None)``.
+    On a TOML parse error, returns ``([], [], {}, error_message)``.
     """
     routes: list[Route] = []
     providers: list[Provider] = []
+    model_extras: dict[str, dict] = {}
     provider_by_name: dict[str, Provider] = {}
 
-    if not path.exists():
-        return routes, providers, None
-
     try:
-        with path.open("rb") as f:
-            data = tomllib.load(f)
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        return routes, providers, f"{path.name}: {e}"
-    except OSError as e:
-        return routes, providers, f"{path.name}: {e}"
+        return routes, providers, model_extras, f"{source}: {e}"
 
     # LLM clients — one Provider per [llm_clients.*] block
     clients = data.get("llm_clients", {})
@@ -236,6 +250,9 @@ def load_existing_routes(
                     p.selected_models.append(mid)
                 if mid not in p.available_models:
                     p.available_models.append(mid)
+        extra = tcfg.get("extra_body")
+        if mid and isinstance(extra, dict) and extra:
+            model_extras[mid] = extra
 
     # Routes
     raw_routes = data.get("routes", {})
@@ -419,7 +436,7 @@ def load_existing_routes(
 
         routes.append(route)
 
-    return routes, providers, None
+    return routes, providers, model_extras, None
 
 
 def _ensure_model_in_providers(model_id: str, providers: list[Provider]) -> None:
@@ -580,7 +597,14 @@ def generate_toml(s: ConfigState) -> str:
     for model_id in target_order:
         tname = target_map[model_id]
         client = model_to_provider.get(model_id, default_provider)
-        targets[tname] = {"id": model_id, "llm_client": client}
+        entry: dict[str, object] = {"id": model_id, "llm_client": client}
+        # Per-model extra_body (capability flags, provider-specific request
+        # params) — emitted as a sub-table; the server merges it into every
+        # request body sent to this model's provider.
+        extra = s.model_extras.get(model_id)
+        if extra:
+            entry["extra_body"] = extra
+        targets[tname] = entry
     if targets:
         doc["targets"] = targets
 

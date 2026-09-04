@@ -1,0 +1,8 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "switchyard.namespace" . }}
+  labels:
+    {{- include "switchyard.labels" (dict "root" . "component" "namespace") | nindent 4 }}
+{{- end }}

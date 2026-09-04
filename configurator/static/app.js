@@ -49,6 +49,26 @@ const SECTION_FOR_TYPE = {
   composite: ["composite"],
 };
 
+// Capability flags recognized by the Models tab. Keys mirror upstream
+// switchyard's TargetCapabilities extension-point API
+// (crates/switchyard-translation/src/policy.rs); they ride in the target's
+// extra_body. [key, label, chip, description]
+const CAPABILITY_FLAGS = [
+  ["supports_images", "Images", "images", "accepts image content blocks"],
+  ["supports_audio", "Audio", "audio", "accepts audio content blocks"],
+  ["supports_video", "Video", "video", "accepts video content blocks"],
+  ["supports_files", "Files", "files", "accepts file content blocks"],
+  ["supports_tools", "Tools", "tools", "tool / function calling"],
+  ["supports_parallel_tool_calls", "Parallel tool calls", "parallel tools", "multiple tool calls per turn"],
+  ["supports_reasoning_effort", "Reasoning effort", "reasoning effort", "accepts the reasoning_effort parameter"],
+  ["supports_json_schema_response_format", "JSON schema output", "json schema", "structured output via response_format json_schema"],
+  ["supports_code_execution", "Code execution", "code exec", "built-in code tools"],
+  ["supports_safety_settings", "Safety settings", "safety", "provider-specific safety tuning"],
+  ["openai_compatible", "OpenAI-compatible", "openai-compat", "speaks the OpenAI chat API"],
+];
+
+const CAPABILITY_KEYS = new Set(CAPABILITY_FLAGS.map((c) => c[0]));
+
 // ---------------------------------------------------------------------------
 // Fetch helpers
 // ---------------------------------------------------------------------------
@@ -56,14 +76,33 @@ const SECTION_FOR_TYPE = {
 async function api(path, opts = {}) {
   const init = { method: opts.method || "GET", headers: {} };
   if (opts.body !== undefined) {
-    init.method = "POST";
+    init.method = opts.method || "POST";
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(opts.body);
   }
-  const resp = await fetch(path, init);
-  const data = await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }));
-  if (!resp.ok && !("ok" in data)) return { ok: false, error: `HTTP ${resp.status}` };
-  return data;
+  // Client-side timeout: a silently-dead port-forward tunnel never
+  // delivers a response (or an error), which would leave the request —
+  // and any busy spinner — hanging forever.
+  const timeoutMs = opts.timeout ?? 60000;
+  const ctrl = new AbortController();
+  init.signal = ctrl.signal;
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    let resp;
+    try {
+      resp = await fetch(path, init);
+    } catch (e) {
+      const msg = e && e.name === "AbortError"
+        ? `request timed out after ${Math.round(timeoutMs / 1000)}s - is the port-forward tunnel to the cluster still alive?`
+        : `Network error: ${e.message || e}`;
+      return { ok: false, error: msg };
+    }
+    const data = await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }));
+    if (!resp.ok && !("ok" in data)) return { ok: false, error: `HTTP ${resp.status}` };
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function toast(title, body = "", severity = "warn") {
@@ -76,6 +115,18 @@ function toast(title, body = "", severity = "warn") {
   setTimeout(() => el.remove(), 6000);
 }
 
+// Run an async action with the button disabled and a spinner shown; the
+// guard makes double-clicks a no-op while a request is already in flight.
+function busyButton(btn, label, fn) {
+  if (btn.disabled) return Promise.resolve();
+  btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.innerHTML = `<span class="spinner" aria-hidden="true"></span>${escapeHtml(label)}`;
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => { btn.disabled = false; btn.innerHTML = orig; });
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -83,17 +134,23 @@ function escapeHtml(s) {
 }
 
 async function load() {
-  const s = await api("/api/state");
+  const s = await api("/api/state", { timeout: 15000 });
   if (!s.ok && s.error) { toast("Failed to load config", s.error, "err"); return; }
   S.state = s;
-  renderStatus();
+  // Model hints are optional metadata — a broken definitions file must not
+  // take the configurator down, just the suggestion badges.
+  const h = await api("/api/model-hints", { timeout: 15000 });
+  S.hints = h && h.ok ? h : { hints: [] };
+  if (h && h.error) toast("Model hints", h.error, "warn");
+  await renderStatus(); // platform info must be known before the first tab render
   renderTab(S.tab);
 }
 
 function renderStatus() {
   const pill = document.getElementById("status-pill");
   const unsaved = document.getElementById("unsaved-pill");
-  api("/api/status").then((st) => {
+  return api("/api/status").then((st) => {
+    S.status = st;
     if (st.switchyard_running) {
       pill.textContent = "switchyard running";
       pill.className = "pill ok";
@@ -132,6 +189,7 @@ function setTab(name) {
 function renderTab(name) {
   if (!S.state) return;
   if (name === "providers") renderProviders();
+  else if (name === "models") renderModels();
   else if (name === "routes") renderRoutes();
   else if (name === "review") renderReview();
   else renderOverview();
@@ -170,11 +228,13 @@ function renderOverview() {
     </div>
     <div style="display:flex; gap:10px; flex-wrap:wrap">
       <button class="btn primary" id="go-providers">${visibleProviders.length ? "Edit Providers" : "Add Providers"}</button>
+      <button class="btn" id="go-models">Configure Models</button>
       <button class="btn" id="go-routes">Configure Routes</button>
       <button class="btn" id="go-review">Review &amp; Save</button>
     </div>
   `;
   el.querySelector("#go-providers").onclick = () => setTab("providers");
+  el.querySelector("#go-models").onclick = () => setTab("models");
   el.querySelector("#go-routes").onclick = () => setTab("routes");
   el.querySelector("#go-review").onclick = () => setTab("review");
 }
@@ -222,26 +282,29 @@ function renderProviders() {
 
   el.querySelector("#add-provider").onclick = () => openProviderModal(null, -1);
   const ref = el.querySelector("#refresh-all");
-  ref.onclick = async () => {
-    ref.disabled = true; ref.textContent = "Refreshing...";
-    const r = await api("/api/providers/refresh");
-    ref.disabled = false; ref.textContent = "Refresh Models (all)";
-    if (!r.ok) { toast("Refresh failed", r.error, "err"); return; }
-    applyState(r);
-    renderProviders();
-    if (r.errors && r.errors.length) toast("Some providers failed", r.errors.join("\n"), "warn");
-    else toast("Models refreshed", r.providers.join("\n"), "ok");
-  };
+  ref.onclick = () =>
+    busyButton(ref, "Refreshing...", async () => {
+      const r = await api("/api/providers/refresh", { method: "POST" });
+      if (!r.ok) { toast("Refresh failed", r.error, "err"); return; }
+      applyState(r);
+      renderProviders();
+      if (r.errors && r.errors.length) toast("Some providers failed", r.errors.join("\n"), "warn");
+      else toast("Models refreshed", r.providers.join("\n"), "ok");
+    });
   el.querySelectorAll("[data-edit-provider]").forEach((b) =>
     b.onclick = () => {
       const i = parseInt(b.dataset.editProvider, 10);
-      openProviderModal(stateProviderIndex(i), i);
+      const si = stateProviderIndex(i);
+      if (si < 0) return;
+      openProviderModal(S.state.providers[si], si);
     });
   el.querySelectorAll("[data-del-provider]").forEach((b) =>
     b.onclick = async () => {
       const i = parseInt(b.dataset.delProvider, 10);
+      const si = stateProviderIndex(i);
+      if (si < 0) return;
       if (!confirm("Delete this provider and its auto-passthrough routes?")) return;
-      const r = await api(`/api/providers/${i}`, { method: "DELETE" });
+      const r = await api(`/api/providers/${si}`, { method: "DELETE" });
       if (!r.ok) { toast("Delete failed", r.error, "err"); return; }
       applyState(r); renderProviders();
     });
@@ -262,7 +325,36 @@ function stateProviderIndex(displayIdx) {
 // Provider modal
 // ---------------------------------------------------------------------------
 
-let PROV = { editingIdx: -1, available: [], selected: [], probedUrl: null };
+let PROV = { editingIdx: -1, available: [], selected: [], probedUrl: null, existingEnvVar: "" };
+
+// The env var name routes.toml will read the key from. Derived from the
+// local name when the user types a key and no explicit name exists (e.g.
+// "my-provider" -> MY_PROVIDER_API_KEY); an env var set on an existing
+// provider is preserved so edits never silently rename it.
+function derivedEnvVar(name) {
+  const base = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return base ? base + "_API_KEY" : "";
+}
+
+function providerEnvVar() {
+  if (!PROV.existingEnvVar) {
+    const key = document.getElementById("p-apikey").value.trim();
+    if (!key) return "";
+  }
+  return PROV.existingEnvVar || derivedEnvVar(document.getElementById("p-name").value.trim());
+}
+
+function updateEnvVarHint() {
+  const hint = document.getElementById("p-envvar-hint");
+  if (!hint) return;
+  const key = document.getElementById("p-apikey").value.trim();
+  if (!key && !PROV.existingEnvVar) {
+    hint.textContent = "Blank = no auth. A typed key is only used for probing; runtime keys come from Kubernetes Secrets.";
+    return;
+  }
+  hint.textContent = `Switchyard reads the key from the env var ${providerEnvVar()} at runtime ` +
+    "(set it via a Kubernetes Secret and the chart's providers values); the typed key is only used for probing.";
+}
 
 function openProviderModal(provider, index) {
   PROV = {
@@ -277,11 +369,12 @@ function openProviderModal(provider, index) {
   document.getElementById("p-display").value = p ? p.display_name : "";
   document.getElementById("p-endpoint").value = p ? p.endpoint : "";
   document.getElementById("p-apikey").value = p ? p.api_key : "";
-  document.getElementById("p-envvar").value = p ? p.api_key_env : "";
   document.getElementById("p-retries").value = p ? p.max_retries : 2;
+  PROV.existingEnvVar = p ? p.api_key_env : "";
   const status = document.getElementById("p-probe-status");
   status.textContent = ""; status.className = "probe-status";
   renderModelChecklist();
+  updateEnvVarHint();
   showModal("provider-modal");
 }
 
@@ -318,7 +411,7 @@ function providerPayload() {
     display_name: document.getElementById("p-display").value.trim(),
     endpoint: document.getElementById("p-endpoint").value.trim(),
     api_key: document.getElementById("p-apikey").value.trim(),
-    api_key_env: document.getElementById("p-envvar").value.trim(),
+    api_key_env: providerEnvVar(),
     max_retries: parseInt(document.getElementById("p-retries").value, 10) || 0,
     available_models: PROV.available,
     selected_models: PROV.selected,
@@ -326,34 +419,38 @@ function providerPayload() {
 }
 
 function wireProviderModal() {
-  document.getElementById("p-probe").onclick = async () => {
-    const endpoint = document.getElementById("p-endpoint").value.trim();
-    const apiKey = document.getElementById("p-apikey").value.trim();
-    const status = document.getElementById("p-probe-status");
-    if (!endpoint) { status.textContent = "Endpoint is required"; status.className = "probe-status err"; return; }
-    status.textContent = "Probing endpoint (trying http/https and common ports)...";
-    status.className = "probe-status";
-    const r = await api("/api/providers/probe", { body: { endpoint, api_key: apiKey } });
-    if (!r.ok) {
-      status.textContent = "Error: " + r.error;
-      status.className = "probe-status err";
-      return;
-    }
-    document.getElementById("p-endpoint").value = r.url;
-    PROV.available = r.models; PROV.selected = [...r.models];
-    status.textContent = `Found ${r.models.length} models (all selected). Uncheck any you don't want.`;
-    status.className = "probe-status ok";
-    renderModelChecklist();
-  };
-  document.getElementById("p-refresh").onclick = async () => {
-    const r = await api("/api/providers/refresh");
-    if (!r.ok) { toast("Refresh failed", r.error, "err"); return; }
-    applyState(r);
-    const p = PROV.editingIdx >= 0 && S.state ? S.state.providers[PROV.editingIdx] : null;
-    if (p) { PROV.available = [...p.available_models]; PROV.selected = [...p.selected_models]; }
-    renderModelChecklist();
-    toast("Models refreshed", (r.providers || []).join("\n") + (r.errors && r.errors.length ? "\nErrors:\n" + r.errors.join("\n") : ""), r.errors && r.errors.length ? "warn" : "ok");
-  };
+  document.getElementById("p-name").addEventListener("input", updateEnvVarHint);
+  document.getElementById("p-apikey").addEventListener("input", updateEnvVarHint);
+  document.getElementById("p-probe").onclick = () =>
+    busyButton(document.getElementById("p-probe"), "Testing...", async () => {
+      const endpoint = document.getElementById("p-endpoint").value.trim();
+      const apiKey = document.getElementById("p-apikey").value.trim();
+      const status = document.getElementById("p-probe-status");
+      if (!endpoint) { status.textContent = "Endpoint is required"; status.className = "probe-status err"; return; }
+      status.textContent = "Probing endpoint (trying http/https and common ports)...";
+      status.className = "probe-status";
+      const r = await api("/api/providers/probe", { body: { endpoint, api_key: apiKey }, timeout: 30000 });
+      if (!r.ok) {
+        status.textContent = "Error: " + r.error;
+        status.className = "probe-status err";
+        return;
+      }
+      document.getElementById("p-endpoint").value = r.url;
+      PROV.available = r.models; PROV.selected = [...r.models];
+      status.textContent = `Found ${r.models.length} models (all selected). Uncheck any you don't want.`;
+      status.className = "probe-status ok";
+      renderModelChecklist();
+    });
+  document.getElementById("p-refresh").onclick = () =>
+    busyButton(document.getElementById("p-refresh"), "Refreshing...", async () => {
+      const r = await api("/api/providers/refresh", { method: "POST" });
+      if (!r.ok) { toast("Refresh failed", r.error, "err"); return; }
+      applyState(r);
+      const p = PROV.editingIdx >= 0 && S.state ? S.state.providers[PROV.editingIdx] : null;
+      if (p) { PROV.available = [...p.available_models]; PROV.selected = [...p.selected_models]; }
+      renderModelChecklist();
+      toast("Models refreshed", (r.providers || []).join("\n") + (r.errors && r.errors.length ? "\nErrors:\n" + r.errors.join("\n") : ""), r.errors && r.errors.length ? "warn" : "ok");
+    });
   document.getElementById("p-manual-add").onclick = () => {
     const inp = document.getElementById("p-manual");
     const added = [];
@@ -375,19 +472,21 @@ document.getElementById("p-key-toggle").onclick = () => {
   const showing = inp.type === "password";
   inp.type = showing ? "text" : "password";
   const btn = document.getElementById("p-key-toggle");
+  btn.textContent = showing ? "hide" : "show";
   btn.setAttribute("aria-label", showing ? "Hide API key" : "Show API key");
 };
-  document.getElementById("p-save").onclick = async () => {
-    const body = { provider: providerPayload() };
-    const r = PROV.editingIdx >= 0
-      ? await api(`/api/providers/${PROV.editingIdx}`, { method: "PUT", body })
-      : await api("/api/providers", { body });
-    if (!r.ok) { toast("Validation", r.error, "err"); return; }
-    applyState(r);
-    closeModal("provider-modal");
-    renderProviders();
-    toast(r.notification || "Provider saved", "", "ok");
-  };
+  document.getElementById("p-save").onclick = () =>
+    busyButton(document.getElementById("p-save"), "Saving...", async () => {
+      const body = { provider: providerPayload() };
+      const r = PROV.editingIdx >= 0
+        ? await api(`/api/providers/${PROV.editingIdx}`, { method: "PUT", body })
+        : await api("/api/providers", { body });
+      if (!r.ok) { toast("Validation", r.error, "err"); return; }
+      applyState(r);
+      closeModal("provider-modal");
+      renderProviders();
+      toast(r.notification || "Provider saved", "", "ok");
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +530,7 @@ function renderRoutes() {
   const summary = modelCount
     ? `${modelCount} available model${modelCount === 1 ? "" : "s"} across ${provCount} provider${provCount === 1 ? "" : "s"}`
     : "(no models available — add a provider on the Providers tab)";
-  let html = `<h2 class="section">Step 2: Route Configuration</h2>
+  let html = `<h2 class="section">Step 3: Route Configuration</h2>
     <p class="sub">${summary}</p>
     ${modelCount ? renderModelLegend(visibleProviders) : ""}
     <p class="help">${st.passthrough_count} auto-passthrough route(s) hidden - one per selected model.</p>`;
@@ -490,6 +589,328 @@ function refsFor(r) {
       return keys.map((k) => r[k]).filter(Boolean);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Models tab (per-model capabilities & extra_body)
+// ---------------------------------------------------------------------------
+
+// The hint for a model, matched by the backend (snapshot models rows carry
+// it). Patterns stay server-side: they are Python-flavored regexes (e.g.
+// (?i) inline flags) that JavaScript's RegExp rejects.
+function hintFor(model) {
+  const row = (S.state && S.state.models || []).find((m) => m.model === model);
+  return (row && row.hint) || null;
+}
+
+// Suggestion state for a model: which suggested keys are still unset,
+// which are set to a DIFFERENT value, and whether the selections match
+// the hint's defaults exactly. "Set" alone is not "matched" — a blocked
+// capability that the hint suggests allowing counts as differing.
+function suggestionState(model, extras) {
+  const hint = hintFor(model);
+  if (!hint || !hint.suggest) return null;
+  const e = extras || {};
+  const entries = Object.entries(hint.suggest);
+  const unset = entries.filter(([k]) => !(k in e));
+  const differing = entries.filter(([k, v]) => k in e && e[k] !== v);
+  return { hint, unset, differing, matches: !unset.length && !differing.length };
+}
+
+function capShortLabel(key) {
+  const cap = CAPABILITY_FLAGS.find((c) => c[0] === key);
+  return cap ? cap[2] : key;
+}
+
+// Chips for suggested keys whose current value differs from the suggestion.
+function differsChips(differing, extras) {
+  return differing.map(([k, v]) => {
+    const cur = extras[k];
+    const curTxt = CAPABILITY_KEYS.has(k)
+      ? (cur === true ? "allow" : "block") : String(cur);
+    const sugTxt = CAPABILITY_KEYS.has(k)
+      ? (v === true ? "allow" : "block") : String(v);
+    return `<span class="tag err">${escapeHtml(capShortLabel(k))}: ${escapeHtml(curTxt)} (suggested ${escapeHtml(sugTxt)})</span>`;
+  }).join(" ");
+}
+
+function capChip(key, value) {
+  const cap = CAPABILITY_FLAGS.find((c) => c[0] === key);
+  if (cap) {
+    return value === false
+      ? `<span class="tag">${escapeHtml(cap[2])}: no</span>`
+      : `<span class="tag ok">${escapeHtml(cap[2])}</span>`;
+  }
+  return `<span class="chip">${escapeHtml(key)}=${escapeHtml(String(value))}</span>`;
+}
+
+function extrasChips(extras) {
+  const entries = Object.entries(extras || {});
+  if (!entries.length) return `<span class="tag">—</span>`;
+  return entries.map(([k, v]) => capChip(k, v)).join(" ");
+}
+
+function suggestedChips(pending) {
+  return pending
+    .map(([k, v]) => capChip(k, v).replace('class="tag ok"', 'class="tag warn"'))
+    .join(" ");
+}
+
+function renderModels() {
+  const st = S.state;
+  const models = st.models || [];
+  let html = `<h2 class="section">Step 2: Models &amp; Capabilities</h2>
+    <p class="sub">Per-model settings, stored in each target's <code>extra_body</code> in routes.toml. Capability flags document what a model
+    accepts (switchyard passes content through by default); extra parameters are merged into every request body sent to the provider.</p>`;
+  if (!models.length) {
+    html += `<div class="empty">No models selected - add a provider and select models first.</div>`;
+  } else {
+    let suggestAll = 0;
+    const rows = models.map((m) => {
+      const sug = suggestionState(m.model, m.extra_body);
+      if (sug && sug.unset.length) suggestAll++;
+      const suggestCol = !sug
+        ? `<span class="tag">—</span>`
+        : sug.matches
+          ? `<span class="tag ok">all set</span>`
+          : `${sug.unset.length ? suggestedChips(sug.unset) : ""}${sug.differing.length ? `<span class="tag err">${sug.differing.length} value(s) differ</span>` : ""}`;
+      return `<tr>
+        <td class="mono">${escapeHtml(m.model)}</td>
+        <td>${escapeHtml(m.provider_label || m.provider)}</td>
+        <td>${extrasChips(m.extra_body)}</td>
+        <td>${suggestCol}</td>
+        <td style="text-align:right"><button class="btn small" data-model-settings="${escapeHtml(m.model)}">Settings</button></td>
+      </tr>`;
+    }).join("");
+    html += `<div class="table-wrapper"><table>
+      <tr><th>Model</th><th>Provider</th><th>Settings</th><th>Suggested</th><th style="text-align:right">Actions</th></tr>
+      ${rows}
+    </table></div>`;
+    if (suggestAll) {
+      html += `<div style="display:flex; gap:10px; margin-top:16px">
+        <button class="btn" id="apply-all-suggestions">Apply all suggestions (${suggestAll})</button>
+      </div>`;
+    }
+    if (S.hints && S.hints.hints && S.hints.hints.length) {
+      html += `<p class="help" style="margin-top:10px">Suggestions come from the model hints definitions`
+        + `${S.hints.source ? ` (<span class="mono">${escapeHtml(S.hints.source)}</span>)` : ""}; first matching pattern wins.</p>`;
+    }
+  }
+  const el = document.getElementById("pane-models");
+  el.innerHTML = html;
+
+  el.querySelectorAll("[data-model-settings]").forEach((b) =>
+    b.onclick = () => openModelModal(b.dataset.modelSettings));
+  const applyAll = el.querySelector("#apply-all-suggestions");
+  if (applyAll) applyAll.onclick = () =>
+    busyButton(applyAll, "Applying...", async () => {
+      let applied = 0;
+      const failures = [];
+      for (const m of (S.state.models || [])) {
+        const sug = suggestionState(m.model, m.extra_body);
+        if (!sug || !sug.unset.length) continue;
+        const merged = { ...(m.extra_body || {}) };
+        for (const [k, v] of sug.unset) merged[k] = v;
+        const r = await api("/api/models/extras", { body: { model: m.model, extra_body: merged } });
+        if (r.ok) applied++;
+        else failures.push(`${m.model}: ${r.error}`);
+      }
+      if (failures.length) toast("Some suggestions failed", failures.join("\n"), "err");
+      if (applied) toast("Suggestions applied", `${applied} model(s) updated - review & save to commit`, "ok");
+      renderModels();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Model settings modal
+// ---------------------------------------------------------------------------
+
+let MODEX = { model: null, extras: {} };
+
+function openModelModal(model) {
+  const row = (S.state.models || []).find((m) => m.model === model);
+  MODEX = { model, extras: JSON.parse(JSON.stringify((row && row.extra_body) || {})) };
+  renderModelModal();
+  showModal("model-modal");
+}
+
+function renderModelModal() {
+  const extras = MODEX.extras;
+  document.getElementById("model-modal-title").textContent = `Model Settings`;
+  const prov = document.getElementById("m-provider");
+  const row = (S.state.models || []).find((m) => m.model === MODEX.model);
+  prov.innerHTML = `<span class="mono">${escapeHtml(MODEX.model || "")}</span>`
+    + (row ? ` &mdash; ${escapeHtml(row.provider_label || row.provider)}` : "");
+
+  // Hint box with description, match state, and one-click actions.
+  const sug = suggestionState(MODEX.model, extras);
+  const hint = sug && sug.hint;
+  const hintBox = document.getElementById("m-hint-box");
+  if (hint) {
+    hintBox.classList.remove("hidden");
+    hintBox.classList.toggle("matched", sug.matches);
+    const status = sug.matches
+      ? `<p class="help" style="margin:0">All suggested values are set.</p>`
+      : [
+          sug.unset.length ? `<div>${suggestedChips(sug.unset)}</div>` : "",
+          sug.differing.length ? `<div>${differsChips(sug.differing, extras)}</div>` : "",
+        ].join("");
+    const buttons = [
+      // Apply fills only unset keys; intentional choices survive.
+      sug.unset.length ? `<button type="button" class="btn small" id="m-apply-hint">Apply suggestions</button>` : "",
+      // Restore overwrites every suggested key with the suggested value.
+      Object.keys(hint.suggest || {}).length ? `<button type="button" class="btn small" id="m-restore-hint">Restore to suggestions</button>` : "",
+    ].filter(Boolean).join("");
+    hintBox.innerHTML = `
+      <p class="help" style="margin:0 0 6px">${escapeHtml(hint.description || "Matching model hint")}</p>
+      ${status}
+      ${buttons ? `<div style="margin-top:6px">${buttons}</div>` : ""}
+    `;
+    const apply = hintBox.querySelector("#m-apply-hint");
+    if (apply) apply.onclick = () => {
+      for (const [k, v] of Object.entries(hint.suggest || {})) {
+        if (!(k in extras)) extras[k] = v;
+      }
+      renderModelModal();
+    };
+    const restore = hintBox.querySelector("#m-restore-hint");
+    if (restore) restore.onclick = () => {
+      for (const [k, v] of Object.entries(hint.suggest || {})) {
+        extras[k] = v;
+      }
+      renderModelModal();
+    };
+  } else {
+    hintBox.classList.add("hidden");
+    hintBox.classList.remove("matched");
+    hintBox.innerHTML = "";
+  }
+
+  // Capability tri-state selects.
+  const caps = document.getElementById("m-capabilities");
+  caps.innerHTML = CAPABILITY_FLAGS.map(([key, label, , desc]) => {
+    const cur = key in extras ? String(extras[key]) : "";
+    const suggested = hint && hint.suggest && key in hint.suggest && !(key in extras)
+      ? ` <span class="tag warn">suggested: ${escapeHtml(String(hint.suggest[key]))}</span>` : "";
+    return `<div class="cap-row${cur !== "" ? " set" : ""}">
+      <div class="cap-name"><b>${escapeHtml(label)}</b>${suggested}<br><span class="help">${escapeHtml(desc)}</span></div>
+      <select data-cap="${escapeHtml(key)}" aria-label="${escapeHtml(label)}">
+        <option value="" ${cur === "" ? "selected" : ""}>unset</option>
+        <option value="true" ${cur === "true" ? "selected" : ""}>allow</option>
+        <option value="false" ${cur === "false" ? "selected" : ""}>block</option>
+      </select>
+    </div>`;
+  }).join("");
+  caps.querySelectorAll("select[data-cap]").forEach((sel) =>
+    sel.onchange = () => {
+      const key = sel.dataset.cap;
+      if (sel.value === "") delete extras[key];
+      else extras[key] = sel.value === "true";
+      renderModelModal();
+    });
+
+  renderExtraRows();
+}
+
+// Free-form parameter rows for keys outside the capability vocabulary.
+function renderExtraRows() {
+  const wrap = document.getElementById("m-extras");
+  const extras = MODEX.extras;
+  const keys = Object.keys(extras).filter((k) => !CAPABILITY_KEYS.has(k));
+  if (!keys.length) {
+    wrap.innerHTML = `<p class="help">(none)</p>`;
+    return;
+  }
+  wrap.innerHTML = "";
+  for (const key of keys) {
+    const v = extras[key];
+    const type = typeof v === "boolean" ? "boolean"
+      : typeof v === "number" ? "number"
+      : typeof v === "string" ? "string" : "json";
+    const text = type === "json" ? JSON.stringify(v) : String(v);
+    const row = document.createElement("div");
+    row.className = "ex-row";
+    row.innerHTML = `
+      <input class="ex-key mono" value="${escapeHtml(key)}" aria-label="Parameter name" />
+      <input class="ex-val mono" value="${escapeHtml(text)}" aria-label="Parameter value" />
+      <select class="ex-type" aria-label="Value type">
+        ${["auto", "string", "number", "boolean", "json"].map((t) =>
+          `<option value="${t}" ${t === type ? "selected" : ""}>${t}</option>`).join("")}
+      </select>
+      <button type="button" class="btn small danger ex-del" aria-label="Remove parameter">&times;</button>
+    `;
+    row.querySelector(".ex-del").onclick = () => { delete extras[key]; renderExtraRows(); };
+    row.querySelector(".ex-key").onchange = (e) => {
+      const nk = e.target.value.trim();
+      if (!nk || nk === key) { e.target.value = key; return; }
+      if (nk in extras) { toast("Duplicate key", `${nk} is already set`, "err"); e.target.value = key; return; }
+      const val = extras[key];
+      delete extras[key];
+      extras[nk] = val;
+    };
+    const store = () => {
+      const t = row.querySelector(".ex-type").value;
+      const r = parseExtraValue(row.querySelector(".ex-val").value, t);
+      if (!r.ok) {
+        toast("Invalid value", `Cannot parse '${row.querySelector(".ex-val").value}' as ${t}`, "err");
+        return;
+      }
+      extras[row.querySelector(".ex-key").value.trim()] = r.value;
+    };
+    row.querySelector(".ex-val").onchange = store;
+    row.querySelector(".ex-type").onchange = store;
+    wrap.appendChild(row);
+  }
+}
+
+// Parse a free-form row value per its type select.
+function parseExtraValue(text, type) {
+  const s = text.trim();
+  if (type === "string") return { ok: true, value: text };
+  if (type === "boolean") {
+    if (/^(true|yes|on)$/i.test(s)) return { ok: true, value: true };
+    if (/^(false|no|off)$/i.test(s)) return { ok: true, value: false };
+    return { ok: false };
+  }
+  if (type === "number") {
+    const n = Number(s);
+    return s !== "" && Number.isFinite(n) ? { ok: true, value: n } : { ok: false };
+  }
+  // auto / json
+  try { return { ok: true, value: JSON.parse(text) }; }
+  catch (e) {
+    if (type === "json") return { ok: false };
+    return { ok: true, value: text };
+  }
+}
+
+function wireModelModal() {
+  document.getElementById("m-add-extra").onclick = () => {
+    const wrap = document.getElementById("m-extras");
+    if (wrap.querySelector("p.help")) wrap.innerHTML = "";
+    const key = prompt("Parameter name (e.g. top_k):", "");
+    if (key === null) return;
+    const k = key.trim();
+    if (!k) return;
+    if (k in MODEX.extras) { toast("Duplicate key", `${k} is already set`, "err"); return; }
+    MODEX.extras[k] = "";
+    renderExtraRows();
+    const row = wrap.querySelector(`.ex-row:last-child`);
+    if (row) row.querySelector(".ex-key").value = k;
+    const val = row && row.querySelector(".ex-val");
+    if (val) val.focus();
+  };
+  document.getElementById("m-save").onclick = () =>
+    busyButton(document.getElementById("m-save"), "Saving...", async () => {
+      const r = await api("/api/models/extras", {
+        body: { model: MODEX.model, extra_body: MODEX.extras },
+      });
+      if (!r.ok) { toast("Validation", r.error, "err"); return; }
+      applyState(r);
+      closeModal("model-modal");
+      renderModels();
+      toast(r.notification || "Model settings saved", "", "ok");
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -631,24 +1052,19 @@ function setSelectVal(id, current, required) {
   const opts = modelOptions(current);
   const wrap = document.getElementById(id);
   if (!wrap) return;
-  // Build the select element via DOM to attach an accessible label
-+    const selectEl = document.createElement('select');
-+    if (required) selectEl.className = 'mselect';
-+    selectEl.innerHTML = opts.options;
-+    // Attach an aria-label derived from the preceding <label> if present
-+    const labelEl = wrap.previousElementSibling;
-+    if (labelEl && labelEl.tagName.toLowerCase() === 'label') {
-+      selectEl.setAttribute('aria-label', labelEl.textContent.trim());
-+    }
-+    wrap.innerHTML = '';
-+    wrap.appendChild(selectEl);
-+    // original line retained for reference (now replaced)
-+    //wrap.innerHTML = `<select ${required ? 'class="mselect"' : ''}>${opts.options}</select>`;
-
-  const sel = wrap.querySelector("select");
+  // Build the select via DOM so it can carry an accessible label.
+  const selectEl = document.createElement("select");
+  if (required) selectEl.className = "mselect";
+  selectEl.innerHTML = opts.options;
+  const labelEl = wrap.previousElementSibling;
+  if (labelEl && labelEl.tagName.toLowerCase() === "label") {
+    selectEl.setAttribute("aria-label", labelEl.textContent.trim());
+  }
+  wrap.innerHTML = "";
+  wrap.appendChild(selectEl);
   if (!opts.any && current) {
     // Only option is a missing model - keep the select showing "(missing)".
-    sel.value = current;
+    selectEl.value = current;
   }
 }
 
@@ -897,17 +1313,18 @@ function wireRouteModal() {
     const name = document.getElementById("r-name").value.trim();
     if (!id && name) document.getElementById("r-id").value = `switchyard/${name}`;
   });
-  document.getElementById("r-save").onclick = async () => {
-    const body = { route: routePayload() };
-    const r = ROUTE.editingIdx >= 0
-      ? await api(`/api/routes/${ROUTE.editingIdx}`, { method: "PUT", body })
-      : await api("/api/routes", { body });
-    if (!r.ok) { toast("Validation", r.error, "err"); return; }
-    applyState(r);
-    closeModal("route-modal");
-    renderRoutes();
-    toast(r.notification || "Route saved", "", "ok");
-  };
+  document.getElementById("r-save").onclick = () =>
+    busyButton(document.getElementById("r-save"), "Saving...", async () => {
+      const body = { route: routePayload() };
+      const r = ROUTE.editingIdx >= 0
+        ? await api(`/api/routes/${ROUTE.editingIdx}`, { method: "PUT", body })
+        : await api("/api/routes", { body });
+      if (!r.ok) { toast("Validation", r.error, "err"); return; }
+      applyState(r);
+      closeModal("route-modal");
+      renderRoutes();
+      toast(r.notification || "Route saved", "", "ok");
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -918,6 +1335,9 @@ async function renderReview() {
   const st = S.state;
   const el = document.getElementById("pane-review");
   const visible = st.providers.filter((p) => !p.is_self);
+  // Kubernetes: restarts are automatic on save (Reloader); the button
+  // would be a no-op that only shows an explanation, so show a hint instead.
+  const k8s = S.status && S.status.platform === "kubernetes";
   let provLines = visible.map((p) =>
     `${escapeHtml(p.display_label)} [${escapeHtml(p.name)}] ${escapeHtml(p.endpoint)} - key: ${p.api_key ? "****(set)" : "(not set)"} - ${p.selected_models.length} models`);
   if (!provLines.length) provLines = ["(none)"];
@@ -933,7 +1353,7 @@ async function renderReview() {
   }).join("");
 
   el.innerHTML = `
-    <h2 class="section">Step 3: Review &amp; Save</h2>
+    <h2 class="section">Step 4: Review &amp; Save</h2>
     <div class="card">
       <h2 class="section">Providers (${visible.length})</h2>
       ${provLines.map((l) => `<p class="help" style="margin:2px 0">${l}</p>`).join("")}
@@ -946,59 +1366,58 @@ async function renderReview() {
     </div>
     <div class="card">
       <h2 class="section">Config files</h2>
-      <p class="help">Files written on save (previous versions are backed up with a timestamp):</p>
+      <p class="help">Configuration written on save (see below for where it lives — files locally, the config ConfigMap in Kubernetes):</p>
       <p class="help mono">${escapeHtml(st.files.routes)}<br>${escapeHtml(st.files.env)}<br>${escapeHtml(st.files.meta)}</p>
       <div id="save-status"></div>
       <div style="display:flex; gap:10px; margin-top:14px; flex-wrap:wrap">
         <button class="btn success" id="do-save">Save Configuration</button>
-        <button class="btn" id="do-restart">Restart switchyard</button>
+        ${k8s ? "" : '<button class="btn" id="do-restart">Restart switchyard</button>'}
         <button class="btn ghost" id="do-preview">Show generated file preview</button>
       </div>
+      ${k8s ? `<p class="help" style="margin-top:10px">Restarts are automatic: saving updates the ConfigMap and Stakater Reloader rolls the switchyard Deployment. If Reloader is not installed, run <span class="mono">kubectl rollout restart deployment/&lt;switchyard&gt; -n &lt;namespace&gt;</span>.</p>` : ""}
     </div>
     <div class="card hidden" id="preview-card"></div>
   `;
 
-  el.querySelector("#do-save").onclick = async () => {
-    const btn = el.querySelector("#do-save");
-    btn.disabled = true; btn.textContent = "Saving...";
-    const r = await api("/api/save", { method: "POST", body: {} });
-    btn.disabled = false; btn.textContent = "Save Configuration";
-    const statusBox = el.querySelector("#save-status");
-    if (!r.ok) {
-      statusBox.className = "statusline err";
-      statusBox.textContent = (r.title ? r.title + ": " : "") + r.error;
-      toast(r.title || "Validation", r.error, "err");
-      return;
-    }
-    statusBox.className = "statusline ok";
-    statusBox.textContent = r.message + "\n" + r.files.join("\n");
-    applyState(r);
-    document.getElementById("unsaved-pill").classList.add("hidden");
-    renderStatus();
-    toast(r.message, r.files.join("\n"), "ok");
-    renderRoutes();
-  };
+  el.querySelector("#do-save").onclick = () =>
+    busyButton(el.querySelector("#do-save"), "Saving...", async () => {
+      const r = await api("/api/save", { method: "POST", body: {} });
+      const statusBox = el.querySelector("#save-status");
+      if (!r.ok) {
+        statusBox.className = "statusline err";
+        statusBox.textContent = (r.title ? r.title + ": " : "") + r.error;
+        toast(r.title || "Validation", r.error, "err");
+        return;
+      }
+      statusBox.className = "statusline ok";
+      statusBox.textContent = r.message + "\n" + r.files.join("\n");
+      applyState(r);
+      document.getElementById("unsaved-pill").classList.add("hidden");
+      renderStatus();
+      toast(r.message, r.files.join("\n"), "ok");
+      renderRoutes();
+    });
 
-  el.querySelector("#do-restart").onclick = async () => {
-    const btn = el.querySelector("#do-restart");
-    btn.disabled = true; btn.textContent = "Restarting...";
-    const r = await api("/api/restart", { method: "POST", body: {} });
-    btn.disabled = false; btn.textContent = "Restart switchyard";
-    const statusBox = el.querySelector("#save-status");
-    statusBox.className = r.ok ? "statusline ok" : "statusline err";
-    statusBox.textContent = r.message;
-    if (r.ok) toast("Switchyard restarted", "", "ok");
-    else toast("Restart failed", r.message, "err");
-    renderStatus();
-  };
+  const restartBtn = el.querySelector("#do-restart");
+  if (restartBtn) restartBtn.onclick = () =>
+    busyButton(restartBtn, "Restarting...", async () => {
+      const r = await api("/api/restart", { method: "POST", body: {} });
+      const statusBox = el.querySelector("#save-status");
+      statusBox.className = r.ok ? "statusline ok" : "statusline err";
+      statusBox.textContent = r.message;
+      if (r.ok) toast("Switchyard restarted", "", "ok");
+      else toast("Restart failed", r.message, "err");
+      renderStatus();
+    });
 
-  el.querySelector("#do-preview").onclick = async () => {
-    const card = el.querySelector("#preview-card");
-    if (!card.classList.contains("hidden")) { card.classList.add("hidden"); return; }
-    card.classList.remove("hidden");
-    card.innerHTML = `<div class="preview-head"><strong>Generated files</strong><span class="copy-hint">Copy-paste into the terminal, or save from the UI above.</span></div>`;
-    const r = await api("/api/preview");
-    if (!r.ok) { card.innerHTML = `<p class="statusline err">Preview failed: ${escapeHtml(r.error || "unknown")}</p>`; return; }
+  el.querySelector("#do-preview").onclick = () =>
+    busyButton(el.querySelector("#do-preview"), "Loading...", async () => {
+      const card = el.querySelector("#preview-card");
+      if (!card.classList.contains("hidden")) { card.classList.add("hidden"); return; }
+      card.classList.remove("hidden");
+      card.innerHTML = `<div class="preview-head"><strong>Generated files</strong><span class="copy-hint">Copy-paste into the terminal, or save from the UI above.</span></div>`;
+      const r = await api("/api/preview");
+      if (!r.ok) { card.innerHTML = `<p class="statusline err">Preview failed: ${escapeHtml(r.error || "unknown")}</p>`; return; }
     const toml = document.createElement("div");
     toml.innerHTML = `<div class="preview-head"><strong>routes.toml</strong><button class="btn small" data-copy>Copy</button></div><textarea readonly></textarea>`;
     toml.querySelector("textarea").value = r.toml;
@@ -1032,7 +1451,7 @@ async function renderReview() {
         }
       };
     card.appendChild(toml); card.appendChild(envwrap);
-  };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1532,7 @@ document.addEventListener("keydown", (e) => {
     });
   wireProviderModal();
   wireRouteModal();
+  wireModelModal();
   load();
 }
 

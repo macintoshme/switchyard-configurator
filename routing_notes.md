@@ -19,11 +19,11 @@ one target.
 | `passthrough`         | n/a      | No (single target)           | No                   |
 | `random`              | No       | Yes (per-call weighted)      | No                   |
 | `llm_classifier` (`capability`) | Depends on `classify_trigger` | Yes if `every_request` | Yes (judge call) |
-| `llm_classifier` (`escalation`) | Yes — sticky once escalated | No | Yes (judge call) |
+| `llm_classifier` (`escalation`) | Yes; sticky once escalated | No | Yes (judge call) |
 | `stage_router`        | No       | Yes (per-turn, signal-driven) | No                   |
 | `advisor_gate`        | No       | Yes (executor + advisor review loop) | Yes (advisor call) |
 
-## `llm_classifier` — `classify_trigger` modes
+## `llm_classifier`: `classify_trigger` modes
 
 The same route type behaves very differently depending on `classify_trigger`:
 
@@ -37,7 +37,7 @@ The same route type behaves very differently depending on `classify_trigger`:
   or `strong_target` against `base_threshold`. Non-latching in `every_request`
   mode.
 - `mode = "escalation"`: escalates to `strong_target` after N confirmations
-  within a turn window. **Strongly latched** — README says "Session affinity
+  within a turn window. **Strongly latched**; the README says "Session affinity
   retains a decision for the process lifetime, including a `strong_target`
   fallback produced while the judge was unreachable."
 - Optional `message_hash_fallback = true` (requires `new_session`) extends
@@ -46,7 +46,7 @@ The same route type behaves very differently depending on `classify_trigger`:
 
 ## `stage_router` (recommended for non-latched mid-conversation routing)
 
-Per-turn routing based on **tool-result history** already in the conversation —
+Per-turn routing based on **tool-result history** already in the conversation:
 no extra classifier call per turn. Switches back and forth as the agent moves
 between exploration and routine implementation.
 
@@ -70,7 +70,7 @@ between exploration and routine implementation.
 - `efficient_first` (default, cost-first): efficient is the default; escalate to
   capable only on a confident capable signal.
 - `capable_first` (experimental, quality-first): capable is the default; drop
-  to efficient only on a confident efficient signal. **Not benchmarked** —
+  to efficient only on a confident efficient signal. **Not benchmarked**;
   server logs a startup warning.
 
 ### Tuning `confidence_threshold`
@@ -78,7 +78,7 @@ between exploration and routine implementation.
 | Threshold | Classifier? | Typical use |
 |---|---|---|
 | `0.0` | No | Cost/latency-sensitive. Accept every signal verdict. Critical errors still escalate. |
-| `0.5` | No | **Recommended starting point.** Corroborative — one full wrong signal scores ~0.46, just under 0.5, so escalation takes a strong signal + corroboration. From SWE-Bench Pro Python-75 calibration. |
+| `0.5` | No | **Recommended starting point.** Corroborative: one full wrong signal scores ~0.46, just under 0.5, so escalation takes a strong signal + corroboration. From SWE-Bench Pro Python-75 calibration. |
 | `0.7`–`0.9` | Yes | Sub-threshold turns go to the LLM classifier. |
 | `1.0` | Required | Tool signals only apply hard overrides; all other turns reach the classifier. |
 
@@ -86,7 +86,7 @@ between exploration and routine implementation.
 
 Add `[routes.stage.classifier]` and raise `confidence_threshold` above `0.0`.
 The classifier is consulted only for sub-threshold turns. Give the classifier
-its own LLM client/quota bucket — sharing one with the efficient tier adds a
+its own LLM client/quota bucket; sharing one with the efficient tier adds a
 request per classified turn and can cause sustained 429s at scale.
 
 ### Optional extras
@@ -100,7 +100,7 @@ request per classified turn and can cause sustained 429s at scale.
 | Source           | When |
 |------------------|------|
 | `override`       | Critical-error severity (or context-compaction marker) forced capable. |
-| `tests_passed`   | Settled run — recent test pass + recent write + no windowed error → efficient. |
+| `tests_passed`   | Settled run: recent test pass + recent write + no windowed error → efficient. |
 | `dimensions`     | Corroborative scorer crossed threshold; sign of score picked tier. |
 | `llm-classifier` | Signals ambiguous; classifier returned a verdict. |
 | `fall_open`      | Signals ambiguous and classifier failed/unconfigured; default tier used. |

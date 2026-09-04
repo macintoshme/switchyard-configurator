@@ -1,0 +1,25 @@
+# Model hint definitions for the configurator's Models tab.
+#
+# Each [[hint]] entry describes a model family: `pattern` is a regex
+# searched against model ids (first match wins, so keep specific entries
+# above generic ones), `description` is shown next to matching models, and
+# `suggest` holds extra_body defaults offered as one-click suggestions
+# (capability flags here, but any request-body param is allowed).
+#
+# This file ships inside the configurator image. To change it without
+# rebuilding, set `modelHints` in the chart's values.yaml (mounted over
+# this file via the MODEL_HINTS_FILE env var).
+
+# Qwen3.8 — verified locally against Qwen3.8-27B-FP8 on vLLM: accepts
+# image input alongside text and handles tool calls.
+[[hint]]
+pattern = '(?i)qwen3[._-]?8'
+description = "Qwen3.8 family - multimodal (image) input and tool calling (verified on Qwen3.8-27B-FP8 / vLLM)"
+suggest = { supports_images = true, supports_tools = true }
+
+# Common vision-language naming: *-VL, vision, LLaVA, Pixtral, and the
+# multimodal flagship families from the major hosted APIs.
+[[hint]]
+pattern = '(?i)(^|[-/.])vl[-0-9.]|vision|llava|pixtral|gemini-[0-9]|gpt-4o|gpt-4\\.1|gpt-5|claude-[0-9]'
+description = "Vision-capable model - accepts image input alongside text"
+suggest = { supports_images = true }

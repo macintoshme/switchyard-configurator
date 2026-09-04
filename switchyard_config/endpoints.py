@@ -1,13 +1,12 @@
-"""Endpoint probing and docker compose runtime."""
+"""Endpoint probing and switchyard runtime status."""
 
 from __future__ import annotations
 
 import json
-import subprocess
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
-from .constants import COMPOSE_FILE
+from .constants import SWITCHYARD_URL
 
 
 def fetch_models_from_endpoint(
@@ -134,43 +133,30 @@ def probe_endpoint(host: str, api_key: str = "") -> tuple[str, list[str]]:
 
 
 def is_switchyard_running() -> bool:
-    """Check if the switchyard container is running via docker compose."""
+    """Check if the switchyard server answers its /health endpoint.
+
+    In Kubernetes the configurator reaches switchyard via its Service
+    (``SWITCHYARD_URL``); locally it defaults to localhost:4000.
+    """
     try:
-        result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "ps", "--format", "json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        with urllib.request.urlopen(f"{SWITCHYARD_URL}/health", timeout=3) as resp:
+            return resp.status == 200
+    except Exception:
         return False
-    if result.returncode != 0:
-        return False
-    for line in result.stdout.strip().splitlines():
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if data.get("Service") == "switchyard" and data.get("State") == "running":
-            return True
-    return False
 
 
 def restart_switchyard() -> tuple[bool, str]:
-    """Restart the switchyard container. Returns (success, message)."""
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "restart", "switchyard"],
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
-    except FileNotFoundError:
-        return False, "docker command not found"
-    except subprocess.TimeoutExpired:
-        return False, "docker compose restart timed out"
-    if result.returncode == 0:
-        return True, "Switchyard container restarted."
-    return False, f"docker compose failed: {result.stderr.strip()}"
+    """Restart of the switchyard server — not managed by the configurator.
+
+    Rollout is handled by the platform: in Kubernetes the Stakater Reloader
+    annotation on the switchyard Deployment restarts the pod whenever the
+    config ConfigMap changes (i.e. on every save). The endpoint is kept so
+    the UI can surface this to the user.
+    """
+    return (
+        False,
+        "Restarts are handled automatically: saving updates the ConfigMap and "
+        "Stakater Reloader rolls the switchyard Deployment. "
+        "If Reloader is not installed, run: "
+        "kubectl rollout restart deployment/<switchyard>",
+    )

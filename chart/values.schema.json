@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "switchyard chart values",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "namespace": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" }
+      }
+    },
+    "routesToml": { "type": "string" },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["envVar", "secret"],
+        "additionalProperties": false,
+        "properties": {
+          "envVar": { "type": "string", "minLength": 1 },
+          "secret": { "type": "string", "minLength": 1 },
+          "secretKey": { "type": "string", "default": "token" }
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      }
+    },
+    "switchyard": {
+      "type": "object",
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": { "type": "string" },
+            "repository": { "type": "string" },
+            "tag": { "type": "string" }
+          }
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "resources": { "type": "object" }
+      }
+    },
+    "configurator": {
+      "type": "object",
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1, "maximum": 1 },
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": { "type": "string" },
+            "repository": { "type": "string" },
+            "tag": { "type": "string" }
+          }
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "uid": { "type": "integer", "minimum": 1 },
+        "gid": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" }
+      }
+    },
+    "serviceType": {
+      "type": "string",
+      "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"]
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval": { "type": "string" },
+        "additionalLabels": { "type": "object" }
+      }
+    },
+    "grafanaDashboard": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "additionalLabels": { "type": "object" }
+      }
+    },
+    "reloader": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

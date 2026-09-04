@@ -226,7 +226,7 @@ class Provider:
     display_name: str = ""  # human-readable label, e.g., "OpenAI", "vLLM"
     endpoint: str = ""  # full URL, e.g., "https://api.openai.com/v1"
     api_key_env: str = ""  # env var name, e.g., "OPENAI_API_KEY"
-    api_key: str = ""  # actual key value (stored in .env, not routes.toml)
+    api_key: str = ""  # actual key value (.env locally, token Secret in k8s; never routes.toml)
     available_models: list[str] = field(default_factory=list)
     selected_models: list[str] = field(default_factory=list)
     max_retries: int = 2  # upstream transport retry count
@@ -236,6 +236,11 @@ class Provider:
 class ConfigState:
     providers: list[Provider] = field(default_factory=list)
     routes: list[Route] = field(default_factory=list)
+    # Per-model extra_body, keyed by model id. Emitted onto the matching
+    # [targets.*] table in routes.toml and merged by the switchyard server
+    # into every request body sent to that model's provider. Capability
+    # flags (supports_images, ...) ride here too — see the Models tab.
+    model_extras: dict[str, dict] = field(default_factory=dict)
 
     @property
     def selected_models(self) -> list[str]:

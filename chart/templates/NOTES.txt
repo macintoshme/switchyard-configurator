@@ -1,0 +1,33 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} has been deployed to namespace
+{{ include "switchyard.namespace" . }} (release "{{ .Release.Name }}" is
+tracked in namespace {{ .Release.Namespace }}).
+
+The chart ships a minimal placeholder configuration (one keyless
+passthrough route); edit it in the configurator UI or upgrade with your
+own routes file:
+
+  helm upgrade {{ .Release.Name }} ./chart -n {{ .Release.Namespace }} --set-file routesToml=routes.toml
+
+Access the configurator UI (edits the config ConfigMap):
+
+  kubectl port-forward -n {{ include "switchyard.namespace" . }} svc/{{ include "configurator.fullname" . }} 8080:{{ .Values.configurator.port }}
+  open http://localhost:8080
+
+Access the switchyard API (OpenAI/Anthropic-compatible proxy):
+
+  kubectl port-forward -n {{ include "switchyard.namespace" . }} svc/{{ include "switchyard.fullname" . }} 4000:{{ .Values.switchyard.port }}
+  curl http://localhost:4000/health
+
+Run the chart's connection tests:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- if .Values.serviceMonitor.enabled }}
+
+Prometheus Operator scraping is enabled (ServiceMonitor {{ include "switchyard.fullname" . }}-monitor).
+{{- end }}
+{{- if .Values.grafanaDashboard.enabled }}
+
+The Grafana dashboard is shipped as ConfigMap {{ include "switchyard.fullname" . }}-dashboard
+with sidecar discovery labels; it appears in Grafana automatically when the
+dashboard sidecar is installed (kube-prometheus-stack default).
+{{- end }}

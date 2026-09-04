@@ -59,11 +59,34 @@ def load_provider_meta(path: Path) -> dict[str, dict]:
 
 def apply_provider_meta(providers: list[Provider], path: Path) -> None:
     """Apply display names from the sidecar metadata file to *providers*."""
-    meta = load_provider_meta(path)
+    apply_provider_meta_dict(providers, load_provider_meta(path))
+
+
+def apply_provider_meta_dict(providers: list[Provider], meta: dict) -> None:
+    """Apply display names from a metadata dict (e.g. from a ConfigMap)."""
     for p in providers:
         entry = meta.get(p.name)
         if isinstance(entry, dict) and entry.get("display_name"):
             p.display_name = entry["display_name"]
+
+
+def provider_meta_json(providers: list[Provider]) -> str:
+    """Serialize provider display names to the sidecar JSON format.
+
+    Mirrors :func:`save_provider_meta`: only providers with a non-default
+    display name are kept, so the result stays minimal. Returns ``""`` when
+    there is nothing to persist.
+    """
+    meta: dict[str, dict] = {}
+    for p in providers:
+        if p.name == SELF_PROVIDER_NAME:
+            continue
+        # Only persist when the user set something non-default.
+        if p.display_name.strip():
+            meta[p.name] = {"display_name": p.display_name.strip()}
+    if not meta:
+        return ""
+    return json.dumps(meta, indent=2, sort_keys=True) + "\n"
 
 
 def save_provider_meta(providers: list[Provider], path: Path) -> None:
@@ -75,15 +98,9 @@ def save_provider_meta(providers: list[Provider], path: Path) -> None:
     than holding an empty ``{}`` — nothing to rotate or back up on
     subsequent saves.
     """
-    meta: dict[str, dict] = {}
-    for p in providers:
-        if p.name == SELF_PROVIDER_NAME:
-            continue
-        # Only persist when the user set something non-default.
-        if p.display_name.strip():
-            meta[p.name] = {"display_name": p.display_name.strip()}
-    if not meta:
+    text = provider_meta_json(providers)
+    if not text:
         path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    path.write_text(text)

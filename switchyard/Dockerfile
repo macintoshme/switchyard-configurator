@@ -44,5 +44,6 @@ ENV HOME=/tmp \
 USER 1000:1000
 EXPOSE 4000
 
-ENTRYPOINT ["switchyard-server"]
-CMD ["--config", "/etc/switchyard/routes.toml", "--host", "0.0.0.0", "--port", "4000"]
+# The port is configurable at runtime via SWITCHYARD_PORT (default 4000).
+# `exec` keeps switchyard-server as PID 1 so it receives signals directly.
+CMD ["sh", "-c", "exec switchyard-server --config /etc/switchyard/routes.toml --host 0.0.0.0 --port ${SWITCHYARD_PORT:-4000}"]
