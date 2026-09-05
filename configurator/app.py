@@ -177,6 +177,11 @@ def save() -> dict:
     return manager.save()
 
 
+@app.post("/api/discard")
+def discard() -> dict:
+    return manager.discard_draft()
+
+
 @app.post("/api/restart")
 def restart() -> dict:
     return manager.restart()

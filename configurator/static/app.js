@@ -1513,6 +1513,7 @@ async function renderReview() {
       <div style="display:flex; gap:10px; margin-top:14px; flex-wrap:wrap">
         <button class="btn success" id="do-save">Save Configuration</button>
         ${k8s ? "" : '<button class="btn" id="do-restart">Restart switchyard</button>'}
+        <button class="btn ghost" id="do-discard" ${st.has_unsaved_changes ? "" : "disabled"} title="Drop unsaved edits and reload the last saved configuration">Discard unsaved changes</button>
         <button class="btn ghost" id="do-preview">Show generated file preview</button>
       </div>
       ${k8s ? `<p class="help" style="margin-top:10px">Restarts are automatic: saving updates the ConfigMap and Stakater Reloader rolls the switchyard Deployment. If Reloader is not installed, run <span class="mono">kubectl rollout restart deployment/&lt;switchyard&gt; -n &lt;namespace&gt;</span>.</p>` : ""}
@@ -1550,6 +1551,22 @@ async function renderReview() {
       else toast("Restart failed", r.message, "err");
       renderStatus();
     });
+
+  const discardBtn = el.querySelector("#do-discard");
+  if (discardBtn) discardBtn.onclick = () => {
+    if (!confirm("Discard all unsaved changes and reload the last saved configuration?")) return;
+    busyButton(discardBtn, "Discarding...", async () => {
+      const r = await api("/api/discard", { method: "POST", body: {} });
+      if (!r.ok) {
+        toast("Discard failed", r.error || "unknown error", "err");
+        return;
+      }
+      applyState(r);
+      document.getElementById("unsaved-pill").classList.add("hidden");
+      toast(r.message, "", "ok");
+      renderTab(S.tab);
+    });
+  };
 
   el.querySelector("#do-preview").onclick = () =>
     busyButton(el.querySelector("#do-preview"), "Loading...", async () => {

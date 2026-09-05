@@ -821,6 +821,26 @@ class ConfigManager:
             or C.PROVIDER_META_DRAFT.exists()
         )
 
+    def discard_draft(self) -> dict:
+        """Drop any unsaved edits and reload the last saved configuration.
+
+        Unsaved changes live as draft files written next to the live config;
+        discarding removes those files (the equivalent of the TUI's "discard")
+        and re-loads the persisted routes/provider state as if the page were
+        reopened.
+        """
+        with self._lock:
+            had_changes = self.has_unsaved_changes()
+            clear_draft()
+            self.draft_recovered = False
+            self._load_initial()
+            return {
+                "ok": True,
+                "message": "Unsaved changes discarded - configuration reloaded",
+                "had_changes": had_changes,
+                "state": self.snapshot(),
+            }
+
     # --- Provider operations ---
 
     def probe(self, endpoint: str, api_key: str) -> dict:
