@@ -32,6 +32,8 @@ from switchyard_config.models import (
     ConfigState,
     Provider,
     Route,
+    parse_ref,
+    qualify_ref,
 )
 from switchyard_config.providers import (
     apply_provider_meta,
@@ -316,6 +318,8 @@ def validate_provider(p: Provider, state: ConfigState, editing_idx: int = -1) ->
     if p.max_retries < 0:
         return f"Max retries must be >= 0 (got {p.max_retries})"
     for m in p.selected_models:
+        if "|" in m:
+            return f"Model '{m}' may not contain '|' (reserved as the provider separator)"
         if err := _run_validator(validate_toml_string_value, m, f"Model '{m}'"):
             return err
     for i, other in enumerate(state.providers):
@@ -386,6 +390,8 @@ def validate_route(r: Route, state: ConfigState, editing_idx: int = -1) -> str |
     if r.id and r.id in r.model_refs():
         return f"Route {r.id} cannot reference itself as a target"
     for m in r.model_refs():
+        if "|" in m and parse_ref(m) is None:
+            return f"Route target '{m}' may not contain '|' (reserved as the provider separator)"
         if err := _run_validator(validate_toml_string_value, m, f"Route target '{m}'"):
             return err
     if r.type == "passthrough" and not r.target:
@@ -579,8 +585,8 @@ def validate_for_save(state: ConfigState) -> str | None:
 
 
 def broken_route_indices(state: ConfigState) -> list[int]:
-    """Indices of non-passthrough routes referencing a missing model."""
-    available = set(state.selected_models)
+    """Indices of non-passthrough routes referencing an unavailable model."""
+    available = state.valid_target_refs()
     return [
         i for i, r in enumerate(state.routes)
         if r.type != "passthrough" and any(m not in available for m in r.model_refs())
@@ -680,13 +686,13 @@ class ConfigManager:
     # --- Passthrough / self-provider sync ---
 
     def _sync(self) -> None:
-        selected = set(self.state.selected_models)
+        selected = self.state.valid_target_refs()
         self.state.routes = [
             r for r in self.state.routes
             if not (r.type == "passthrough" and r.target and r.target not in selected)
         ]
         self.state.routes.extend(
-            ensure_passthrough_routes(self.state.routes, self.state.selected_models)
+            ensure_passthrough_routes(self.state.routes, self.state.target_options())
         )
         sync_self_provider(self.state)
 
@@ -708,6 +714,7 @@ class ConfigManager:
             "passthrough_count": passthrough_count,
             "selected_models": list(s.selected_models),
             "available_models": list(s.available_models),
+            "targets": self._target_options(),
             "models": self._models_summary(),
             "broken_route_indices": broken_route_indices(s),
             "cycles": find_route_cycles(s),
@@ -717,12 +724,28 @@ class ConfigManager:
             "files": self._file_refs(),
         }
 
+    def _target_options(self) -> list[dict]:
+        """Targets the route builders can reference, one per (provider, model).
+
+        Reuses ``ConfigState.target_options()`` and adds the display label
+        so the frontend can render ``model (provider)`` for shared models.
+        """
+        labels = {
+            p.name: provider_display_name(p)
+            for p in self.state.providers
+            if p.name != C.SELF_PROVIDER_NAME
+        }
+        opts = self.state.target_options()
+        for o in opts:
+            o["provider_label"] = labels.get(o["provider"], o["provider"])
+        return opts
+
     def _models_summary(self) -> list[dict]:
-        """Per-model rows for the Models tab: selected models of real
-        (non-self) providers with their extra_body settings. The synthetic
-        self provider (route chaining) is skipped — it has no upstream to
-        tune. A model offered by several providers is listed once (first
-        provider wins, matching target generation).
+        """Per-model rows for the Models tab: one per (real provider, model)
+        with its extra_body settings. The synthetic self provider (route
+        chaining) is skipped — it has no upstream to tune. A model offered
+        by several providers now gets one row per provider, each with its
+        own ``ref`` (``provider|model``) so its extra_body can differ.
 
         Each row carries the matching hint (if any) from the definitions
         file. Matching happens here rather than in the browser because
@@ -731,19 +754,19 @@ class ConfigManager:
         loaded = model_hints.load_model_hints()
         hint_list = loaded.get("hints", [])
         rows: list[dict] = []
-        seen: set[str] = set()
+        counts = self.state.model_provider_counts()
         for p in self.state.providers:
             if p.name == C.SELF_PROVIDER_NAME:
                 continue
             for m in p.selected_models:
-                if m in seen:
-                    continue
-                seen.add(m)
+                ref = self.state.canonical_ref(p.name, m)
                 rows.append({
+                    "ref": ref,
                     "model": m,
+                    "ambiguous": counts.get(m, 0) > 1,
                     "provider": p.name,
                     "provider_label": provider_display_name(p),
-                    "extra_body": dict(self.state.model_extras.get(m, {})),
+                    "extra_body": dict(self.state.model_extras.get(ref, {})),
                     "hint": model_hints.match_hint(m, hint_list),
                 })
         return rows
@@ -775,7 +798,7 @@ class ConfigManager:
         from copy import deepcopy
         state_copy = deepcopy(self.state)
         # Generate missing passthrough routes based on currently selected models.
-        new_routes = ensure_passthrough_routes(state_copy.routes, list(state_copy.selected_models))
+        new_routes = ensure_passthrough_routes(state_copy.routes, state_copy.target_options())
         state_copy.routes.extend(new_routes)
         return state_copy
 
@@ -937,7 +960,8 @@ class ConfigManager:
             model = (model or "").strip()
             if not model:
                 return {"ok": False, "error": "Model is required"}
-            if model not in self.state.selected_models:
+            canonical = {t["ref"] for t in self.state.target_options()}
+            if model not in canonical:
                 return {"ok": False, "error": f"Unknown or unselected model '{model}'"}
             if not isinstance(extra_body, dict):
                 return {"ok": False, "error": "extra_body must be an object"}

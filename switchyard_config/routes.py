@@ -15,7 +15,7 @@ from .constants import (
     SELF_PROVIDER_NAME,
     SWITCHYARD_DEFAULT_PORT,
 )
-from .models import ConfigState, Provider, Route
+from .models import ConfigState, Provider, Route, parse_ref, qualify_ref
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,9 @@ def validate_toml_identifier(name: str, label: str) -> None:
 
     TOML bare keys allow only ``A-Za-z0-9_-``. A ``.`` would create a
     nested table and ``]`` would terminate the table header, so both are
-    rejected. Empty strings are reported by the caller.
+    rejected. ``|`` is reserved as the provider separator in model target
+    references, so it's rejected too. Empty strings are reported by the
+    caller.
     """
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise ValidationError(field=label, message=f"{label} '{name}' may only contain letters, digits, '_' and '-'")
@@ -236,23 +238,49 @@ def parse_routes_text(
         providers.append(provider)
         provider_by_name[client_name] = provider
 
-    # Targets — collect model IDs and assign to the provider each target uses
+    # Targets — collect model IDs and assign to the provider each target uses.
+    # A target's reference is the bare model id when only one client serves
+    # it, or ``<client>|<model id>`` when several providers offer the same
+    # model (so routes keep which provider they meant).
     targets = data.get("targets", {})
-    target_to_model: dict[str, str] = {}
+    target_model_ids: dict[str, str] = {}
+    target_client_for: dict[str, str] = {}
+    client_models: dict[str, set[str]] = {}
+    extra_per_target: dict[str, dict] = {}
     for tname, tcfg in targets.items():
         mid = tcfg.get("id", "")
         client = tcfg.get("llm_client", "")
         if mid:
-            target_to_model[tname] = mid
+            target_model_ids[tname] = mid
             if client and client in provider_by_name:
+                target_client_for[tname] = client
                 p = provider_by_name[client]
                 if mid not in p.selected_models:
                     p.selected_models.append(mid)
                 if mid not in p.available_models:
                     p.available_models.append(mid)
+                client_models.setdefault(client, set()).add(mid)
         extra = tcfg.get("extra_body")
-        if mid and isinstance(extra, dict) and extra:
-            model_extras[mid] = extra
+        if mid and isinstance(extra, dict) and extra and client:
+            extra_per_target[tname] = extra
+
+    # Model ids offered by more than one provider need qualified refs.
+    model_clients: dict[str, set[str]] = {}
+    for client, mids in client_models.items():
+        for mid in mids:
+            model_clients.setdefault(mid, set()).add(client)
+    multi_models = {m for m, cs in model_clients.items() if len(cs) > 1}
+
+    target_to_model: dict[str, str] = {}
+    for tname, mid in target_model_ids.items():
+        client = target_client_for.get(tname)
+        if client and mid in multi_models:
+            target_to_model[tname] = qualify_ref(client, mid)
+        else:
+            target_to_model[tname] = mid
+        extra = extra_per_target.get(tname)
+        if extra is not None and client:
+            model_extras[target_to_model[tname]] = extra
 
     # Routes
     raw_routes = data.get("routes", {})
@@ -274,7 +302,12 @@ def parse_routes_text(
         route = Route(name=rname, id=rid, type=internal_type)
 
         def _resolve(key: str) -> str:
-            """Resolve a target-name reference to its model id (if known)."""
+            """Resolve a target-name reference to a model ref (if known).
+
+            The mapping carries bare model ids for single-provider models and
+            ``<provider>|<model>`` refs for shared ones, so routes keep which
+            provider's copy of a shared model they reference.
+            """
             ref = rcfg.get(key, "")
             if not isinstance(ref, str):
                 return ""
@@ -349,12 +382,12 @@ def parse_routes_text(
         if internal_type == "composite" and isinstance(rcfg.get("stage"), dict):
             stage_cfg = rcfg["stage"]
         if "capable_target" in stage_cfg:
-            route.capable_target = target_to_model.get(
-                stage_cfg["capable_target"], stage_cfg["capable_target"]
+            route.capable_target = _resolve_target(
+                stage_cfg["capable_target"], target_to_model
             )
         if "efficient_target" in stage_cfg:
-            route.efficient_target = target_to_model.get(
-                stage_cfg["efficient_target"], stage_cfg["efficient_target"]
+            route.efficient_target = _resolve_target(
+                stage_cfg["efficient_target"], target_to_model
             )
         if "picker" in stage_cfg:
             route.picker = str(stage_cfg["picker"])
@@ -386,8 +419,8 @@ def parse_routes_text(
         if isinstance(cb, dict):
             route.stage_classifier_enabled = "true"
             if "target" in cb:
-                route.stage_classifier_target = target_to_model.get(
-                    cb["target"], cb["target"]
+                route.stage_classifier_target = _resolve_target(
+                    cb["target"], target_to_model
                 )
             _str_field_into(route, "stage_classifier_base_threshold",
                             cb.get("base_threshold"), "0.5")
@@ -439,32 +472,47 @@ def parse_routes_text(
     return routes, providers, model_extras, None
 
 
-def _ensure_model_in_providers(model_id: str, providers: list[Provider]) -> None:
-    """Add *model_id* to the first provider that doesn't have it yet.
+def _ensure_model_in_providers(model_ref: str, providers: list[Provider]) -> None:
+    """Add *model_ref* to the provider that serves it.
 
-    Used when loading routes that reference models not tied to a specific
-    target's llm_client. Falls back to the first provider.
+    Used when loading routes that reference models not directly tied to a
+    target's llm_client. *model_ref* may be a bare model id (resolves to the
+    first provider that serves it, else the first provider) or a qualified
+    ``provider|model`` reference. Falls back to the first provider.
     """
     if not providers:
         return
+    parsed = parse_ref(model_ref)
+    if parsed:
+        provider_name, model_id = parsed
+        for p in providers:
+            if p.name == provider_name:
+                if model_id not in p.available_models:
+                    p.available_models.append(model_id)
+                if model_id not in p.selected_models:
+                    p.selected_models.append(model_id)
+                return
+        # Provider not configured yet (shouldn't happen on a valid config).
+        return
     for p in providers:
-        if model_id in p.available_models:
-            if model_id not in p.selected_models:
-                p.selected_models.append(model_id)
+        if model_ref in p.available_models:
+            if model_ref not in p.selected_models:
+                p.selected_models.append(model_ref)
             return
     first = providers[0]
-    if model_id not in first.available_models:
-        first.available_models.append(model_id)
-    if model_id not in first.selected_models:
-        first.selected_models.append(model_id)
+    if model_ref not in first.available_models:
+        first.available_models.append(model_ref)
+    if model_ref not in first.selected_models:
+        first.selected_models.append(model_ref)
 
 
 def _resolve_target(ref: object, mapping: dict[str, str]) -> str:
-    """Resolve a target-name reference to its model id.
+    """Resolve a target-name reference to a model ref.
 
     *ref* is usually a string target name; non-string or empty values resolve
-    to an empty string. If the name is in *mapping* (target -> model id), the
-    model id is returned; otherwise the raw name is returned unchanged.
+    to an empty string. If the name is in *mapping* (target -> model ref, bare
+    id or ``provider|model``), the ref is returned; otherwise the raw name is
+    returned unchanged.
     """
     if not isinstance(ref, str) or not ref:
         return ""
@@ -576,32 +624,61 @@ def generate_toml(s: ConfigState) -> str:
 
     model_to_provider = s.model_to_provider()
     default_provider = s.providers[0].name if s.providers else ""
+    # Canonical reference for every (provider, model) the state selects, so a
+    # bare model id that is ambiguous resolves the same way the UI offered it.
+    ref_map: dict[str, str] = {}  # canonical ref -> (model id, provider name)
 
-    # ---- Pass 1: collect model IDs in route order, assign target names ----
-    target_map: dict[str, str] = {}  # model_id -> target_name
+    def register_models(provider: Provider) -> None:
+        for m in provider.selected_models:
+            ref = s.canonical_ref(provider.name, m)
+            ref_map.setdefault(ref, (m, provider.name))
+
+    for provider in s.providers:
+        register_models(provider)
+
+    def resolve_ref(ref: str) -> tuple[str, str]:
+        """Map a route/model reference to its (model id, provider name)."""
+        parsed = parse_ref(ref)
+        if parsed:
+            provider_name, model_id = parsed
+            return model_id, provider_name
+        # Bare model id: the canonical ref when ambiguous (the form always
+        # emits the bare id when unique and provider|model when ambiguous),
+        # else the first provider that serves it.
+        return ref_map.get(ref, (ref, model_to_provider.get(ref, default_provider)))
+
+    def llm_client_for(ref: str) -> str:
+        return resolve_ref(ref)[1]
+
+    # ---- Pass 1: collect model refs in route order, assign target names ----
+    target_map: dict[str, str] = {}  # ref -> target_name
     target_order: list[str] = []  # preserve first-seen order
 
-    def assign_target(model_id: str) -> None:
-        if model_id and model_id not in target_map:
-            target_map[model_id] = f"target_{len(target_order)}"
-            target_order.append(model_id)
+    def assign_target(model_ref: str) -> None:
+        if model_ref and model_ref not in target_map:
+            target_map[model_ref] = f"target_{len(target_order)}"
+            target_order.append(model_ref)
 
     for route in s.routes:
         if not route.name or not route.id:
             continue
-        for m in route.model_refs():
-            assign_target(m)
+        for ref in route.model_refs():
+            assign_target(ref)
 
     # ---- targets (all grouped together) ----
     targets: dict[str, dict] = {}
-    for model_id in target_order:
-        tname = target_map[model_id]
-        client = model_to_provider.get(model_id, default_provider)
+    for model_ref in target_order:
+        tname = target_map[model_ref]
+        model_id, client = resolve_ref(model_ref)
         entry: dict[str, object] = {"id": model_id, "llm_client": client}
         # Per-model extra_body (capability flags, provider-specific request
         # params) — emitted as a sub-table; the server merges it into every
-        # request body sent to this model's provider.
-        extra = s.model_extras.get(model_id)
+        # request body sent to this model's provider. Keyed by the canonical
+        # provider|model ref so two providers serving the same model can each
+        # carry their own extras.
+        parsed = parse_ref(model_ref)
+        extra_key = model_ref if parsed else s.canonical_ref(client, model_id)
+        extra = s.model_extras.get(extra_key)
         if extra:
             entry["extra_body"] = extra
         targets[tname] = entry
@@ -609,8 +686,14 @@ def generate_toml(s: ConfigState) -> str:
         doc["targets"] = targets
 
     # Helper for the route pass: look up a target name.
-    def tn(model_id: str) -> str:
-        return target_map.get(model_id, "")
+    def tn(model_ref: str) -> str:
+        if not model_ref:
+            return ""
+        if model_ref in target_map:
+            return target_map[model_ref]
+        # Accept a bare model id that was emitted qualified: e.g. a route
+        # holding a stale bare reference to an ambiguous model.
+        return target_map.get(s.canonical_ref(resolve_ref(model_ref)[1], model_ref), "")
 
 # ---- Pass 2: build route tables ----
     routes: dict[str, dict] = {}
@@ -983,18 +1066,32 @@ def is_auto_passthrough(route: Route) -> bool:
 
 
 def ensure_passthrough_routes(
-    routes: list[Route], selected_models: list[str]
+    routes: list[Route], model_options: list
 ) -> list[Route]:
-    """Create passthrough routes for models that don't have one.
+    """Create passthrough routes for unique models that don't have one.
+
+    ``model_options`` is ``ConfigState.target_options()`` (each entry carries
+    a ``ref`` and an ``ambiguous`` flag) — a model served by a single provider
+    gets its own auto passthrough (exposed directly by model id, as before),
+    while a model offered by several providers is *not* given one, because a
+    bare-id passthrough can't pick which provider to use without routing
+    logic (such models only appear as ``provider|model`` route targets).
+
+    For backward compatibility a plain list of model id strings is also
+    accepted, in which case every id is passed through unchanged.
 
     Returns the new routes added (does not mutate *routes*). A model is
-    considered "covered" if any existing route already uses it as an ``id``
-    (i.e., it's directly accessible) — we only create passthroughs for models
-    that are referenced as targets but have no route of their own.
+    considered "covered" if any existing route already uses it as an ``id``.
     """
     existing_ids = {r.id for r in routes if r.id}
     new_routes: list[Route] = []
-    for model_id in selected_models:
+    for opt in model_options:
+        if isinstance(opt, str):
+            model_id = opt
+        else:
+            if opt.get("ambiguous"):
+                continue
+            model_id = opt["model"]
         if model_id in existing_ids:
             continue
         new_routes.append(_passthrough_route_for(model_id))

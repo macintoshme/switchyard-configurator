@@ -4,6 +4,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .constants import SELF_PROVIDER_NAME
+
+
+# ---------------------------------------------------------------------------
+# Target references
+# ---------------------------------------------------------------------------
+
+# A route target is the (llm_client, model id) pair. Two providers can serve
+# the same model id, so a route reference that only names the model is
+# ambiguous. When a model id is offered by more than one provider the route
+# fields carry a *qualified* reference ``<provider>|<model id>``; model ids
+# that are unique across providers keep the bare model id (as before). The
+# separator is reserved, so model ids and route ids may not contain ``|``.
+REF_SEP = "|"
+
+
+def qualify_ref(provider_name: str, model_id: str) -> str:
+    """Encode an unambiguous (provider, model) target reference."""
+    return f"{provider_name}{REF_SEP}{model_id}"
+
+
+def parse_ref(ref: str) -> tuple[str, str] | None:
+    """Split a target reference into ``(provider_name, model_id)``.
+
+    Returns ``None`` for a bare model id (no separator).
+    """
+    if not isinstance(ref, str):
+        return None
+    provider, sep, model = ref.partition(REF_SEP)
+    if sep and provider and model:
+        return provider, model
+    return None
+
 
 # Route type -> (label, toml type, optional toml mode)
 ROUTE_TYPES: list[tuple[str, str, str]] = [
@@ -264,3 +297,67 @@ class ConfigState:
                 if m not in mapping:
                     mapping[m] = p.name
         return mapping
+
+    def real_providers(self) -> list[Provider]:
+        """Providers other than the synthetic self (route chaining) provider."""
+        return [p for p in self.providers if p.name != SELF_PROVIDER_NAME]
+
+    def model_provider_counts(self) -> dict[str, int]:
+        """Number of real providers offering each selected model id."""
+        counts: dict[str, int] = {}
+        for p in self.real_providers():
+            for m in p.selected_models:
+                counts[m] = counts.get(m, 0) + 1
+        return counts
+
+    def ambiguous_models(self) -> set[str]:
+        """Model ids selected on more than one real provider."""
+        return {m for m, count in self.model_provider_counts().items() if count > 1}
+
+    def canonical_ref(self, provider_name: str, model_id: str) -> str:
+        """The route/extras reference for (provider, model).
+
+        The bare model id when only one provider offers it (backward
+        compatible); a ``provider|model`` qualified reference when the
+        model is offered by several providers.
+        """
+        if model_id in self.ambiguous_models():
+            return qualify_ref(provider_name, model_id)
+        return model_id
+
+    def target_options(self) -> list[dict]:
+        """One selectable target per (real provider, selected model).
+
+        These are the values route builders and the Models tab offer: each
+        carries ``ref`` (what routes and ``model_extras`` use), the bare
+        ``model`` id, the ``provider`` name, and an ``ambiguous`` flag.
+        """
+        counts = self.model_provider_counts()
+        options: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for p in self.real_providers():
+            for m in p.selected_models:
+                if (p.name, m) in seen:
+                    continue
+                seen.add((p.name, m))
+                options.append({
+                    "ref": self.canonical_ref(p.name, m),
+                    "model": m,
+                    "provider": p.name,
+                    "ambiguous": counts.get(m, 0) > 1,
+                })
+        return options
+
+    def valid_target_refs(self) -> set[str]:
+        """Every route reference that resolves to a provider-served model.
+
+        Includes both the bare model id and every qualified ``provider|model``
+        reference, so stale bare references in hand-written routes are still
+        treated as valid (they resolve to the first provider, as before).
+        """
+        refs: set[str] = set()
+        for p in self.real_providers():
+            for m in p.selected_models:
+                refs.add(self.canonical_ref(p.name, m))
+                refs.add(m)
+        return refs

@@ -542,8 +542,13 @@ function renderRoutes() {
       <tr><th>Name</th><th>Route ID</th><th>Type</th><th>Targets</th><th>Status</th><th style="text-align:right">Actions</th></tr>`;
     for (const { idx, r } of custom) {
       const broken = st.broken_route_indices.includes(idx);
+      const validRefs = new Set();
+      for (const t of (st.targets || [])) {
+        validRefs.add(t.ref);
+        validRefs.add(t.model);
+      }
       const missing = [];
-      for (const m of (refsFor(r))) if (!st.selected_models.includes(m)) missing.push(m);
+      for (const m of (refsFor(r))) if (!validRefs.has(m)) missing.push(m);
       html += `<tr>
         <td>${escapeHtml(r.name)}</td>
         <td class="mono">${escapeHtml(r.id)}</td>
@@ -753,7 +758,7 @@ function renderModels() {
         <td>${escapeHtml(m.provider_label || m.provider)}</td>
         <td>${extrasChips(m.extra_body, tunables)}</td>
         <td>${suggestCol}</td>
-        <td style="text-align:right"><button class="btn small" data-model-settings="${escapeHtml(m.model)}">Settings</button></td>
+        <td style="text-align:right"><button class="btn small" data-model-settings="${escapeHtml(m.ref)}">Settings</button></td>
       </tr>`;
     }).join("");
     html += `<div class="table-wrapper"><table>
@@ -785,7 +790,7 @@ function renderModels() {
         if (!sug || !sug.unset.length) continue;
         const merged = { ...(m.extra_body || {}) };
         for (const [k, v] of sug.unset) merged[k] = v;
-        const r = await api("/api/models/extras", { body: { model: m.model, extra_body: merged } });
+        const r = await api("/api/models/extras", { body: { model: m.ref, extra_body: merged } });
         if (r.ok) applied++;
         else failures.push(`${m.model}: ${r.error}`);
       }
@@ -799,11 +804,17 @@ function renderModels() {
 // Model settings modal
 // ---------------------------------------------------------------------------
 
-let MODEX = { model: null, extras: {} };
+let MODEX = { ref: null, model: null, provider: null, provider_label: null, extras: {} };
 
-function openModelModal(model) {
-  const row = (S.state.models || []).find((m) => m.model === model);
-  MODEX = { model, extras: JSON.parse(JSON.stringify((row && row.extra_body) || {})) };
+function openModelModal(ref) {
+  const row = (S.state.models || []).find((m) => m.ref === ref);
+  MODEX = {
+    ref,
+    model: row ? row.model : (ref || "").split("|").pop(),
+    provider: row ? row.provider : null,
+    provider_label: row ? row.provider_label : null,
+    extras: JSON.parse(JSON.stringify((row && row.extra_body) || {})),
+  };
   renderModelModal();
   showModal("model-modal");
 }
@@ -812,9 +823,9 @@ function renderModelModal() {
   const extras = MODEX.extras;
   document.getElementById("model-modal-title").textContent = `Model Settings`;
   const prov = document.getElementById("m-provider");
-  const row = (S.state.models || []).find((m) => m.model === MODEX.model);
+  const row = (S.state.models || []).find((m) => m.ref === MODEX.ref);
   prov.innerHTML = `<span class="mono">${escapeHtml(MODEX.model || "")}</span>`
-    + (row ? ` &mdash; ${escapeHtml(row.provider_label || row.provider)}` : "");
+    + (MODEX.provider_label ? ` &mdash; ${escapeHtml(MODEX.provider_label)}` : "");
 
   // Hint box with description, match state, and one-click actions.
   const sug = suggestionState(MODEX.model, extras);
@@ -1010,7 +1021,7 @@ function wireModelModal() {
   document.getElementById("m-save").onclick = () =>
     busyButton(document.getElementById("m-save"), "Saving...", async () => {
       const r = await api("/api/models/extras", {
-        body: { model: MODEX.model, extra_body: MODEX.extras },
+        body: { model: MODEX.ref, extra_body: MODEX.extras },
       });
       if (!r.ok) { toast("Validation", r.error, "err"); return; }
       applyState(r);
@@ -1138,18 +1149,36 @@ function renderRouteType() {
 }
 
 function modelOptions(current) {
-  // Models usable as targets: all selected models except this route's own id (prevents self-loop).
+  // Models usable as targets: one option per (provider, model) — a model
+  // served by several providers shows an option per provider, qualified so
+  // a load balancer can route traffic to each. Self-loop prevention uses the
+  // route's own id.
   const ownId = document.getElementById("r-id").value.trim();
-  const models = S.state.selected_models.filter((m) => m !== ownId);
-  let opts = '';
-  if (!models.length) return { any: false, options: `<option value="">(no models available)</option>` };
-  if (!models.includes(current)) {
+  const targets = (S.state.targets || []).filter((t) => t.model !== ownId);
+  const label = (t) => t.ambiguous
+    ? `${t.model} (${t.provider_label || t.provider})`
+    : t.model;
+  // Legacy: a bare model id stored on the route that maps to a provider copy.
+  const defaultRefFor = (bare) => {
+    const t = targets.find((x) => x.model === bare);
+    return t ? t.ref : null;
+  };
+  let opts = "";
+  if (!targets.length) {
+    return { any: false, options: `<option value="">(no models available)</option>` };
+  }
+  const has = (ref) => targets.some((t) => t.ref === ref);
+  if (current && !has(current)) {
+    const dr = defaultRefFor(current);
+    if (dr) current = dr;
+  }
+  if (!has(current)) {
     opts += `<option value="">-- select a model --</option>`;
   }
-  for (const m of models) {
-    opts += `<option value="${escapeHtml(m)}" ${m === current ? "selected" : ""}>${escapeHtml(m)}</option>`;
+  for (const t of targets) {
+    opts += `<option value="${escapeHtml(t.ref)}" ${t.ref === current ? "selected" : ""}>${escapeHtml(label(t))}</option>`;
   }
-  if (current && !models.includes(current)) {
+  if (current && !has(current)) {
     opts += `<option value="${escapeHtml(current)}" selected>(missing) ${escapeHtml(current)}</option>`;
   }
   return { any: true, options: opts };
@@ -1178,13 +1207,15 @@ function setSelectVal(id, current, required) {
 function setChecklist(id, selected) {
   const wrap = document.getElementById(id);
   wrap.innerHTML = "";
-  const models = S.state.selected_models.filter((m) => m !== document.getElementById("r-id").value.trim());
-  if (!models.length) { wrap.innerHTML = `<p class="help">(no models available)</p>`; return; }
-  for (const m of models) {
+  const ownId = document.getElementById("r-id").value.trim();
+  const targets = (S.state.targets || []).filter((t) => t.model !== ownId);
+  if (!targets.length) { wrap.innerHTML = `<p class="help">(no models available)</p>`; return; }
+  for (const t of targets) {
+    const label = t.ambiguous ? `${t.model} (${t.provider_label || t.provider})` : t.model;
     const l = document.createElement("label");
     const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.value = m; cb.checked = selected.includes(m);
-    l.appendChild(cb); l.appendChild(document.createTextNode(" " + m));
+    cb.type = "checkbox"; cb.value = t.ref; cb.checked = selected.includes(t.ref);
+    l.appendChild(cb); l.appendChild(document.createTextNode(" " + label));
     wrap.appendChild(l);
   }
 }
@@ -1199,8 +1230,8 @@ function setRandomTargets(selected, weightsStr) {
   wrap.innerHTML = "";
   ROUTE.randomWeights = {};
   const ownId = document.getElementById("r-id").value.trim();
-  const models = S.state.selected_models.filter((m) => m !== ownId);
-  if (!models.length) {
+  const targets = (S.state.targets || []).filter((t) => t.model !== ownId);
+  if (!targets.length) {
     wrap.innerHTML = `<p class="help">(no models available)</p>`;
     return;
   }
@@ -1208,23 +1239,26 @@ function setRandomTargets(selected, weightsStr) {
   const parts = (weightsStr || "").split(",").map((s) => s.trim()).filter(Boolean);
   selected.forEach((t, i) => { ROUTE.randomWeights[t] = parts[i] || "1"; });
 
-  for (const m of models) {
-    const isSel = selected.includes(m);
+  for (const t of targets) {
+    const isSel = selected.includes(t.ref);
     const item = document.createElement("div");
     item.className = "rw-item";
     const row = document.createElement("label");
     row.className = "rw-row";
     const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.value = m; cb.checked = isSel;
+    cb.type = "checkbox"; cb.value = t.ref; cb.checked = isSel;
     cb.onchange = () => {
-      if (cb.checked && !ROUTE.randomWeights[m]) ROUTE.randomWeights[m] = "1";
+      if (cb.checked && !ROUTE.randomWeights[t.ref]) ROUTE.randomWeights[t.ref] = "1";
       renderRandomWeights();
     };
     const name = document.createElement("span");
-    name.className = "rw-name"; name.textContent = m;
+    name.className = "rw-name";
+    name.textContent = t.ambiguous
+      ? `${t.model} (${t.provider_label || t.provider})`
+      : t.model;
     row.appendChild(cb); row.appendChild(name);
     const wc = document.createElement("div");
-    wc.className = "rw-weight"; wc.dataset.model = m;
+    wc.className = "rw-weight"; wc.dataset.model = t.ref;
     item.appendChild(row); item.appendChild(wc);
     wrap.appendChild(item);
   }
